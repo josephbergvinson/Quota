@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ ! "${tag}" =~ ${tag_pattern} ]]; then
+            echo "Release tags must look like v1.2.3 or v1.2.3-beta.1." >&2
+            exit 2
+          fi
+
+          version="${tag#v}"
+          bundle_version="${version%%-*}"
+          prerelease=false
+          if [[ "${version}" == *-* ]]; then
+            prerelease=true
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "bundle_version=${bundle_version}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+
+      - name: Test tagged source
+        run: make test
+
+      - name: Build universal release app
+        env:
+          QUOTA_VERSION: ${{ steps.version.outputs.bundle_version }}
+          QUOTA_BUILD_VERSION: ${{ github.run_number }}
+        run: ./Scripts/packaging/build-release-app.sh
+
+      - name: Sign, verify, and archive final app
+        id: archive
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          app_path="dist/Quota.app"
+          archive_name="Quota-${RELEASE_VERSION}-macOS-universal.zip"
+          archive_path="dist/${archive_name}"
+          verification_directory="$(mktemp -d "${RUNNER_TEMP}/quota-archive-verify.XXXXXX")"
+          cleanup_verification_directory() {
+            rm -rf "${verification_directory}"
+          }
+          trap cleanup_verification_directory EXIT
+
+          lipo "${app_path}/Contents/MacOS/Quota" -verify_arch arm64 x86_64
+          xattr -cr "${app_path}"
+          codesign \
+            --force \
+            --sign - \
+            --identifier com.jbergvinson.quota \
+            --timestamp=none \
+            "${app_path}"
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
+          ditto -c -k \
+            --keepParent \
+            --norsrc \
+            --noextattr \
+            --noqtn \
+            --noacl \
+            "${app_path}" \
+            "${archive_path}"
+          unzip -t "${archive_path}"
+          ditto -x -k "${archive_path}" "${verification_directory}"
+          codesign --verify --deep --strict --verbose=2 \
+            "${verification_directory}/Quota.app"
+          lipo "${verification_directory}/Quota.app/Contents/MacOS/Quota" \
+            -verify_arch arm64 x86_64
+          (
+            cd dist
+            shasum -a 256 "${archive_name}" > "${archive_name}.sha256"
+          )
+
+          echo "archive_path=${archive_path}" >> "${GITHUB_OUTPUT}"
+          echo "checksum_path=${archive_path}.sha256" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          ARCHIVE_PATH: ${{ steps.archive.outputs.archive_path }}
+          CHECKSUM_PATH: ${{ steps.archive.outputs.checksum_path }}
+        run: |
+          notes=$(cat <<'EOF'
+          ## Installation
+
+          Download `Quota-<version>-macOS-universal.zip`, expand it, and move `Quota.app` to your Applications folder. The app supports macOS 14 or later on Apple silicon and Intel Macs.
+
+          This build is ad-hoc signed rather than Developer ID signed or notarized. On first launch, Control-click Quota in Finder, choose **Open**, then confirm **Open**. If macOS still blocks it, use **System Settings → Privacy & Security → Open Anyway**. Do not disable Gatekeeper. You can verify the ZIP against the attached `.sha256` file.
+
+          Connecting a ChatGPT Pro account requires a local Codex command supplied by the ChatGPT app, Codex app, or Codex CLI. ChatGPT data reflects provider-reported Codex usage, not every feature in ChatGPT. OpenAI API organization accounts instead require an organization-owner Admin API key and do not expose ChatGPT Pro quotas.
+
+          Quota keeps account history on your Mac and stores credentials in macOS Keychain.
+          EOF
+          )
+
+          release_args=(
+            "${RELEASE_TAG}"
+            "${ARCHIVE_PATH}"
+            "${CHECKSUM_PATH}"
+            --verify-tag
+            --generate-notes
+            --title "Quota ${RELEASE_VERSION}"
+            --notes "${notes}"
+          )
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          gh release create "${release_args[@]}"
