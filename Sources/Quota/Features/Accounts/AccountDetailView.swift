@@ -14,6 +14,11 @@ struct AccountDetailView: View {
         UsageAnalytics.capacity(for: account, snapshot: snapshot, now: model.now)
     }
 
+    private var supportedQuotaWindows: [QuotaWindow] {
+        guard let snapshot else { return [] }
+        return UsageAnalytics.supportedQuotaWindows(for: snapshot)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -165,7 +170,8 @@ struct AccountDetailView: View {
                 }
             }
 
-            if let windows = snapshot?.quotaWindows.value, !windows.isEmpty {
+            if !supportedQuotaWindows.isEmpty {
+                let windows = supportedQuotaWindows
                 ForEach(windows) { window in
                     QuotaWindowRow(window: window)
                     if window.id != windows.last?.id {

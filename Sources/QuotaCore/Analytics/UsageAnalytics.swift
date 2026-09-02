@@ -158,7 +158,8 @@ public enum UsageAnalytics {
         let isStale = now.timeIntervalSince(snapshot.capturedAt) > capacityFreshnessInterval
             || snapshot.capturedAt.timeIntervalSince(now) > 5 * 60
 
-        let activeWindows = (snapshot.quotaWindows.value ?? []).filter { window in
+        let supportedWindows = supportedQuotaWindows(for: snapshot)
+        let activeWindows = supportedWindows.filter { window in
             !isClearlyUninitializedChatGPTWindow(window, in: snapshot)
                 && (window.resetsAt.map { $0 > now } ?? true)
         }
@@ -197,6 +198,15 @@ public enum UsageAnalytics {
         )
     }
 
+    /// Returns the quota windows that Quota supports for presentation. Codex exposes a
+    /// separate GPT-5.3-Codex-Spark bucket; it is intentionally omitted from ChatGPT views,
+    /// including snapshots saved before this policy existed. Manual readings remain untouched.
+    public static func supportedQuotaWindows(for snapshot: UsageSnapshot) -> [QuotaWindow] {
+        let windows = snapshot.quotaWindows.value ?? []
+        guard snapshot.source == .chatGPTAppServer else { return windows }
+        return windows.filter { !ChatGPTQuotaWindowPolicy.isSparkWindow($0) }
+    }
+
     public static func resetEvents(
         accounts: [ConnectedAccount],
         snapshots: [UsageSnapshot],
@@ -218,7 +228,8 @@ public enum UsageAnalytics {
 
         for snapshot in snapshots {
             guard let account = accountsByID[snapshot.accountID] else { continue }
-            let quotaWindows = snapshot.quotaWindows.value ?? []
+            let rawQuotaWindows = snapshot.quotaWindows.value ?? []
+            let quotaWindows = supportedQuotaWindows(for: snapshot)
             for window in quotaWindows {
                 guard !isClearlyUninitializedChatGPTWindow(window, in: snapshot) else { continue }
                 guard let resetsAt = window.resetsAt, interval.containsHalfOpen(resetsAt) else { continue }
@@ -245,8 +256,11 @@ public enum UsageAnalytics {
                 eventsByID[event.id] = event
             }
 
+            // A reading containing only an excluded provider bucket is not an
+            // allowance reading. Keep the raw-window check so its reset cannot
+            // reappear under the generic "Current allowance" label.
             if
-                quotaWindows.isEmpty,
+                rawQuotaWindows.isEmpty,
                 let allowance = snapshot.allowance.value,
                 let resetsAt = snapshot.resetAt.value,
                 interval.containsHalfOpen(resetsAt),

@@ -157,6 +157,14 @@ public struct ChatGPTUsageProvider: UsageProvider {
         for (dictionaryID, bucket) in buckets {
             let limitID = bucket.limitID ?? dictionaryID
             let limitName = bucket.limitName ?? bucket.limitID ?? dictionaryID
+            let isSparkWindow = ChatGPTQuotaWindowPolicy.isSparkWindow(
+                identifier: dictionaryID,
+                name: limitName
+            ) || ChatGPTQuotaWindowPolicy.isSparkWindow(
+                identifier: limitID,
+                name: limitName
+            )
+            guard !isSparkWindow else { continue }
             if let primary = bucket.primary,
                !isClearlyUninitialized(primary, capturedAt: capturedAt) {
                 windows.append(

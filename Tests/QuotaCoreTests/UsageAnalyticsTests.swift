@@ -401,4 +401,110 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertEqual(capacity.status, .unavailable)
         XCTAssertTrue(events.isEmpty)
     }
+
+    func testSavedCodexSparkWindowsAreExcludedFromCapacityAndCalendar() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = try makeAccount(kind: .chatGPTPro)
+        let sparkFiveHour = try QuotaWindow(
+            identifier: "codex_bengalfox:primary",
+            name: "GPT-5.3-Codex-Spark · 5-hour",
+            usedPercent: 0,
+            resetsAt: now.addingTimeInterval(3_600),
+            durationMinutes: 300
+        )
+        let sparkWeekly = try QuotaWindow(
+            identifier: "codex_bengalfox:secondary",
+            name: "GPT-5.3-Codex-Spark · 1-week",
+            usedPercent: 0,
+            resetsAt: now.addingTimeInterval(6 * 24 * 60 * 60),
+            durationMinutes: 10_080
+        )
+        let regular = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 0,
+            resetsAt: now.addingTimeInterval(2 * 24 * 60 * 60),
+            durationMinutes: 10_080
+        )
+        let snapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: now,
+            windows: [sparkFiveHour, sparkWeekly, regular],
+            resetAt: sparkFiveHour.resetsAt
+        )
+        let interval = DateInterval(
+            start: now,
+            end: now.addingTimeInterval(7 * 24 * 60 * 60)
+        )
+
+        let capacity = UsageAnalytics.capacity(for: account, snapshot: snapshot, now: now)
+        let events = UsageAnalytics.resetEvents(
+            accounts: [account],
+            snapshots: [snapshot],
+            in: interval
+        )
+
+        XCTAssertEqual(
+            UsageAnalytics.supportedQuotaWindows(for: snapshot).map(\.identifier),
+            ["codex:primary"]
+        )
+        XCTAssertEqual(capacity.limitingWindowName, "codex · 1-week")
+        XCTAssertEqual(capacity.remainingFraction, 1.0)
+        XCTAssertEqual(events.map(\.windowName), ["codex · 1-week"])
+        XCTAssertEqual(events.map(\.resetsAt), [regular.resetsAt])
+
+        let sparkOnlySnapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: now,
+            windows: [sparkFiveHour],
+            resetAt: sparkFiveHour.resetsAt
+        )
+        let sparkOnlyCapacity = UsageAnalytics.capacity(
+            for: account,
+            snapshot: sparkOnlySnapshot,
+            now: now
+        )
+        XCTAssertNil(sparkOnlyCapacity.remainingFraction)
+
+        let manualSnapshot = UsageSnapshot.manual(
+            accountID: account.id,
+            allowance: nil,
+            quotaWindows: [sparkFiveHour],
+            resetAt: nil,
+            capturedAt: now
+        )
+        XCTAssertEqual(
+            UsageAnalytics.supportedQuotaWindows(for: manualSnapshot).count,
+            1
+        )
+    }
+
+    private func makeChatGPTSnapshot(
+        accountID: UUID,
+        capturedAt: Date,
+        windows: [QuotaWindow],
+        resetAt: Date?
+    ) -> UsageSnapshot {
+        let unavailable = UnavailableMetric(
+            reason: .notExposedByProvider,
+            detail: "Unavailable"
+        )
+        return UsageSnapshot(
+            accountID: accountID,
+            capturedAt: capturedAt,
+            source: .chatGPTAppServer,
+            reportingPeriod: nil,
+            allowance: .unavailable(unavailable),
+            quotaWindows: .available(windows),
+            resetAt: resetAt.map(Metric.available) ?? .unavailable(unavailable),
+            totalTokens: .unavailable(unavailable),
+            inputTokens: .unavailable(unavailable),
+            cachedInputTokens: .unavailable(unavailable),
+            outputTokens: .unavailable(unavailable),
+            requests: .unavailable(unavailable),
+            costUSD: .unavailable(unavailable),
+            modelUsage: .unavailable(unavailable),
+            dailyUsage: .unavailable(unavailable)
+        )
+    }
 }

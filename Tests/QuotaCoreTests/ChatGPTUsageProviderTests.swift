@@ -163,17 +163,72 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.compactMap(\.resetsAt).min(), actualReset)
     }
 
+    func testCodexSparkBucketsAreExcludedWhileRegularCodexBucketIsRetained() throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
+        let limits = ChatGPTRateLimitsDTO(
+            rateLimits: makeSnapshot(),
+            rateLimitsByLimitID: [
+                "codex_bengalfox": makeSnapshot(
+                    limitID: "codex_bengalfox",
+                    limitName: "GPT-5.3-Codex-Spark",
+                    primary: makeWindow(
+                        usedPercent: 0,
+                        durationMinutes: 300,
+                        // This is just outside the generic placeholder tolerance. The
+                        // model/identifier policy must still exclude it.
+                        resetsAt: capturedAt.addingTimeInterval(18_007)
+                    ),
+                    secondary: makeWindow(
+                        usedPercent: 25,
+                        durationMinutes: 10_080,
+                        resetsAt: capturedAt.addingTimeInterval(6 * 24 * 60 * 60)
+                    )
+                ),
+                // The map key is the provider's authoritative metered ID. Keep
+                // excluding Spark if nested metadata ever disagrees with it.
+                "codex_bengalfox_mismatch": makeSnapshot(
+                    limitID: "unexpected",
+                    limitName: "Other",
+                    primary: makeWindow(
+                        usedPercent: 10,
+                        durationMinutes: 10_080,
+                        resetsAt: capturedAt.addingTimeInterval(3 * 24 * 60 * 60)
+                    )
+                ),
+                "codex": makeSnapshot(
+                    limitID: "codex",
+                    limitName: "Codex",
+                    primary: makeWindow(
+                        usedPercent: 80,
+                        durationMinutes: 10_080,
+                        resetsAt: capturedAt.addingTimeInterval(2 * 24 * 60 * 60)
+                    )
+                )
+            ],
+            resetCredits: nil
+        )
+
+        let windows = try makeProvider().makeQuotaWindows(
+            from: limits,
+            capturedAt: capturedAt
+        )
+
+        XCTAssertEqual(windows.map(\.identifier), ["codex:primary"])
+        XCTAssertEqual(windows.first?.remainingPercent, 20)
+    }
+
     private func makeSnapshot(
         limitID: String? = nil,
         limitName: String? = nil,
-        primary: ChatGPTRateLimitWindowDTO? = nil
+        primary: ChatGPTRateLimitWindowDTO? = nil,
+        secondary: ChatGPTRateLimitWindowDTO? = nil
     ) -> ChatGPTRateLimitSnapshotDTO {
         ChatGPTRateLimitSnapshotDTO(
             limitID: limitID,
             limitName: limitName,
             planType: "pro",
             primary: primary,
-            secondary: nil,
+            secondary: secondary,
             credits: nil,
             individualLimit: nil,
             rateLimitReachedType: nil,
