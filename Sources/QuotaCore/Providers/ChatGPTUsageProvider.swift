@@ -157,15 +157,13 @@ public struct ChatGPTUsageProvider: UsageProvider {
         for (dictionaryID, bucket) in buckets {
             let limitID = bucket.limitID ?? dictionaryID
             let limitName = bucket.limitName ?? bucket.limitID ?? dictionaryID
-            let isSparkWindow = ChatGPTQuotaWindowPolicy.isSparkWindow(
-                identifier: dictionaryID,
-                name: limitName
-            ) || ChatGPTQuotaWindowPolicy.isSparkWindow(
-                identifier: limitID,
-                name: limitName
-            )
-            guard !isSparkWindow else { continue }
             if let primary = bucket.primary,
+               isSupportedQuotaWindow(
+                   primary,
+                   dictionaryID: dictionaryID,
+                   limitID: limitID,
+                   limitName: limitName
+               ),
                !isClearlyUninitialized(primary, capturedAt: capturedAt) {
                 windows.append(
                     try makeQuotaWindow(
@@ -177,6 +175,12 @@ public struct ChatGPTUsageProvider: UsageProvider {
                 )
             }
             if let secondary = bucket.secondary,
+               isSupportedQuotaWindow(
+                   secondary,
+                   dictionaryID: dictionaryID,
+                   limitID: limitID,
+                   limitName: limitName
+               ),
                !isClearlyUninitialized(secondary, capturedAt: capturedAt) {
                 windows.append(
                     try makeQuotaWindow(
@@ -192,6 +196,23 @@ public struct ChatGPTUsageProvider: UsageProvider {
             if $0.resetsAt == $1.resetsAt { return $0.name < $1.name }
             return ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture)
         }
+    }
+
+    private func isSupportedQuotaWindow(
+        _ value: ChatGPTRateLimitWindowDTO,
+        dictionaryID: String,
+        limitID: String,
+        limitName: String
+    ) -> Bool {
+        ChatGPTQuotaWindowPolicy.isSupportedWindow(
+            identifier: dictionaryID,
+            name: limitName,
+            durationMinutes: value.windowDurationMinutes
+        ) || ChatGPTQuotaWindowPolicy.isSupportedWindow(
+            identifier: limitID,
+            name: limitName,
+            durationMinutes: value.windowDurationMinutes
+        )
     }
 
     /// Codex can return an unused bucket with a reset anchored to the instant it was read. Such a

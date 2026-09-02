@@ -103,7 +103,7 @@ If a future reset is changed or removed by a newer reading before it occurs, the
 
 Codex can report unused placeholder windows whose reset time moves on every refresh. Quota omits those placeholders from capacity and calendar views while retaining real unused and active windows.
 
-Quota also omits Codex's separate GPT-5.3-Codex-Spark rate-limit buckets from ChatGPT capacity and reset views; they are not part of regular account rotation planning.
+Quota's ChatGPT capacity and reset views are intentionally scoped to the regular Codex one-week window. Codex's separate GPT-5.3-Codex-Spark buckets and shorter-duration buckets are not part of regular account rotation planning.
 
 ## Local data and credentials
 

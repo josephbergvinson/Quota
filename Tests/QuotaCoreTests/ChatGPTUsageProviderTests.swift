@@ -3,7 +3,7 @@ import XCTest
 @testable import QuotaCore
 
 final class ChatGPTUsageProviderTests: XCTestCase {
-    func testQuotaWindowsPreserveProviderBucketsAndDurations() throws {
+    func testQuotaWindowsKeepOnlyTheRegularCodexWeeklyBucket() throws {
         let reset = Date(timeIntervalSince1970: 1_788_264_000)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(),
@@ -13,8 +13,13 @@ final class ChatGPTUsageProviderTests: XCTestCase {
                     limitName: "Codex",
                     primary: ChatGPTRateLimitWindowDTO(
                         usedPercent: 72,
-                        windowDurationMinutes: 300,
+                        windowDurationMinutes: 10_080,
                         resetsAt: reset
+                    ),
+                    secondary: ChatGPTRateLimitWindowDTO(
+                        usedPercent: 12,
+                        windowDurationMinutes: 300,
+                        resetsAt: reset.addingTimeInterval(300 * 60)
                     )
                 )
             ],
@@ -29,7 +34,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
 
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows[0].identifier, "codex:primary")
-        XCTAssertEqual(windows[0].name, "Codex · 5-hour")
+        XCTAssertEqual(windows[0].name, "Codex · 1-week")
         XCTAssertEqual(windows[0].usedPercent, 72)
         XCTAssertEqual(windows[0].remainingPercent, 28)
         XCTAssertEqual(windows[0].resetsAt, reset)
@@ -38,9 +43,11 @@ final class ChatGPTUsageProviderTests: XCTestCase {
     func testOutOfRangeProviderPercentageIsRejected() {
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(
+                limitID: "codex",
+                limitName: "Codex",
                 primary: ChatGPTRateLimitWindowDTO(
                     usedPercent: 137,
-                    windowDurationMinutes: nil,
+                    windowDurationMinutes: 10_080,
                     resetsAt: nil
                 )
             ),
@@ -60,10 +67,12 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(
+                limitID: "codex",
+                limitName: "Codex",
                 primary: makeWindow(
                     usedPercent: 0,
-                    durationMinutes: 300,
-                    resetsAt: capturedAt.addingTimeInterval(300 * 60 + 2)
+                    durationMinutes: 10_080,
+                    resetsAt: capturedAt.addingTimeInterval(10_080 * 60 + 2)
                 )
             ),
             rateLimitsByLimitID: nil,
@@ -80,12 +89,14 @@ final class ChatGPTUsageProviderTests: XCTestCase {
 
     func testStableUnusedWindowIsRetained() throws {
         let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
-        let reset = capturedAt.addingTimeInterval(300 * 60 - 60)
+        let reset = capturedAt.addingTimeInterval(10_080 * 60 - 60)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(
+                limitID: "codex",
+                limitName: "Codex",
                 primary: makeWindow(
                     usedPercent: 0,
-                    durationMinutes: 300,
+                    durationMinutes: 10_080,
                     resetsAt: reset
                 )
             ),
@@ -104,12 +115,14 @@ final class ChatGPTUsageProviderTests: XCTestCase {
 
     func testUsedWindowIsRetainedEvenWhenResetMatchesFullDuration() throws {
         let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
-        let reset = capturedAt.addingTimeInterval(300 * 60)
+        let reset = capturedAt.addingTimeInterval(10_080 * 60)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(
+                limitID: "codex",
+                limitName: "Codex",
                 primary: makeWindow(
                     usedPercent: 1,
-                    durationMinutes: 300,
+                    durationMinutes: 10_080,
                     resetsAt: reset
                 )
             ),
@@ -199,6 +212,11 @@ final class ChatGPTUsageProviderTests: XCTestCase {
                     limitID: "codex",
                     limitName: "Codex",
                     primary: makeWindow(
+                        usedPercent: 12,
+                        durationMinutes: 300,
+                        resetsAt: capturedAt.addingTimeInterval(5 * 60 * 60)
+                    ),
+                    secondary: makeWindow(
                         usedPercent: 80,
                         durationMinutes: 10_080,
                         resetsAt: capturedAt.addingTimeInterval(2 * 24 * 60 * 60)
@@ -213,7 +231,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             capturedAt: capturedAt
         )
 
-        XCTAssertEqual(windows.map(\.identifier), ["codex:primary"])
+        XCTAssertEqual(windows.map(\.identifier), ["codex:secondary"])
         XCTAssertEqual(windows.first?.remainingPercent, 20)
     }
 

@@ -426,10 +426,24 @@ final class UsageAnalyticsTests: XCTestCase {
             resetsAt: now.addingTimeInterval(2 * 24 * 60 * 60),
             durationMinutes: 10_080
         )
+        let regularShort = try QuotaWindow(
+            identifier: "codex:secondary",
+            name: "codex · 5-hour",
+            usedPercent: 10,
+            resetsAt: now.addingTimeInterval(3_600),
+            durationMinutes: 300
+        )
+        let unrelatedWeekly = try QuotaWindow(
+            identifier: "codex_other:primary",
+            name: "Other · 1-week",
+            usedPercent: 5,
+            resetsAt: now.addingTimeInterval(4 * 24 * 60 * 60),
+            durationMinutes: 10_080
+        )
         let snapshot = makeChatGPTSnapshot(
             accountID: account.id,
             capturedAt: now,
-            windows: [sparkFiveHour, sparkWeekly, regular],
+            windows: [sparkFiveHour, sparkWeekly, regularShort, unrelatedWeekly, regular],
             resetAt: sparkFiveHour.resetsAt
         )
         let interval = DateInterval(

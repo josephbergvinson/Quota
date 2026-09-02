@@ -198,13 +198,14 @@ public enum UsageAnalytics {
         )
     }
 
-    /// Returns the quota windows that Quota supports for presentation. Codex exposes a
-    /// separate GPT-5.3-Codex-Spark bucket; it is intentionally omitted from ChatGPT views,
-    /// including snapshots saved before this policy existed. Manual readings remain untouched.
+    /// Returns the quota windows that Quota supports for presentation. ChatGPT-backed Codex can
+    /// expose model-specific and short-duration buckets; Quota's account rotation and planner
+    /// intentionally show only the regular Codex one-week allowance. This also filters older
+    /// saved readings. Manual readings remain untouched.
     public static func supportedQuotaWindows(for snapshot: UsageSnapshot) -> [QuotaWindow] {
         let windows = snapshot.quotaWindows.value ?? []
         guard snapshot.source == .chatGPTAppServer else { return windows }
-        return windows.filter { !ChatGPTQuotaWindowPolicy.isSparkWindow($0) }
+        return windows.filter { ChatGPTQuotaWindowPolicy.isSupportedWindow($0) }
     }
 
     public static func resetEvents(
