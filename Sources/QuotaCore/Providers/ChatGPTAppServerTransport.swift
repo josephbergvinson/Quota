@@ -41,6 +41,8 @@ public enum ChatGPTConnectorError: LocalizedError, Equatable, Sendable {
             "The local Codex service returned a message Quota could not read."
         case .protocolBufferOverflow:
             "The local Codex service produced more data than Quota can safely buffer."
+        case .rpcFailure(code: -32_603):
+            "The local Codex service encountered a temporary internal error. Please try again."
         case let .rpcFailure(code):
             "The local Codex service rejected the request (\(code))."
         case .invalidProviderPayload:

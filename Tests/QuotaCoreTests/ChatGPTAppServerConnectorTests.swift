@@ -383,6 +383,47 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
         try assertFixtureProcessesExited(in: fixture.codexHome, expectedCount: 2)
     }
 
+    func testTelemetryRetriesOneTransientRPCFailureInANewProcess() async throws {
+        let fixture = try makeProcessFixture(script: Self.telemetryTransientRPCFailureFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 1
+        )
+        let connector = ChatGPTAppServerConnector(configuration: configuration)
+
+        let telemetry = try await connector.readTelemetry()
+
+        XCTAssertEqual(telemetry.rateLimits.rateLimits.primary?.usedPercent, 61)
+        XCTAssertEqual(telemetry.tokenUsage.summary.lifetimeTokens, 4_200)
+        XCTAssertEqual(try fixtureAttemptCount(in: fixture.codexHome), 2)
+        try assertFixtureProcessesExited(in: fixture.codexHome, expectedCount: 2)
+    }
+
+    func testTelemetryPropagatesSecondTransientRPCFailureAndStopsBothProcesses() async throws {
+        let fixture = try makeProcessFixture(script: Self.telemetryAlwaysRPCFailureFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 1
+        )
+        let connector = ChatGPTAppServerConnector(configuration: configuration)
+
+        do {
+            _ = try await connector.readTelemetry()
+            XCTFail("Expected the second transient RPC failure to propagate")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .rpcFailure(code: -32_603))
+            XCTAssertTrue(error.localizedDescription.contains("temporary internal error"))
+            XCTAssertTrue(error.localizedDescription.contains("try again"))
+        }
+
+        XCTAssertEqual(try fixtureAttemptCount(in: fixture.codexHome), 2)
+        try assertFixtureProcessesExited(in: fixture.codexHome, expectedCount: 2)
+    }
+
     func testTelemetryPropagatesSecondTimeoutAndStopsBothProcesses() async throws {
         let fixture = try makeProcessFixture(script: Self.telemetryAlwaysTimesOutFixtureScript)
         let configuration = try ChatGPTAppServerConfiguration(
@@ -442,6 +483,27 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
             XCTFail("Expected the authentication refresh timeout to propagate")
         } catch let error as ChatGPTConnectorError {
             XCTAssertEqual(error, .requestTimedOut(method: "account/rateLimits/read"))
+        }
+
+        XCTAssertEqual(try fixtureAttemptCount(in: fixture.codexHome), 1)
+        try assertFixtureProcessesExited(in: fixture.codexHome, expectedCount: 1)
+    }
+
+    func testTelemetryDoesNotRetryTransientRPCFailureWhenRefreshingAuthentication() async throws {
+        let fixture = try makeProcessFixture(script: Self.telemetryAlwaysRPCFailureFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 1
+        )
+        let connector = ChatGPTAppServerConnector(configuration: configuration)
+
+        do {
+            _ = try await connector.readTelemetry(refreshToken: true)
+            XCTFail("Expected the authentication refresh RPC failure to propagate")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .rpcFailure(code: -32_603))
         }
 
         XCTAssertEqual(try fixtureAttemptCount(in: fixture.codexHome), 1)
@@ -610,6 +672,67 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
           printf '{"id":1,"result":{"userAgent":"fixture","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}\n' "$CODEX_HOME"
           ;;
         *account*rateLimits*read*)
+          ;;
+        *account*read*)
+          printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.com","planType":"pro"},"requiresOpenaiAuth":true}}'
+          ;;
+      esac
+    done
+    """#
+
+    private static let telemetryTransientRPCFailureFixtureScript = #"""
+    #!/bin/sh
+    attempt_file="$CODEX_HOME/fixture-attempt"
+    pids_file="$CODEX_HOME/fixture-pids"
+    attempt=1
+    if [ -f "$attempt_file" ]; then
+      attempt=$(( $(cat "$attempt_file") + 1 ))
+    fi
+    printf '%s\n' "$attempt" > "$attempt_file"
+    printf '%s\n' "$$" >> "$pids_file"
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialized"'*)
+          ;;
+        *'"method":"initialize"'*)
+          printf '{"id":1,"result":{"userAgent":"fixture","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}\n' "$CODEX_HOME"
+          ;;
+        *account*rateLimits*read*)
+          printf '%s\n' '{"id":3,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":61,"windowDurationMins":300,"resetsAt":1788264000}},"rateLimitsByLimitId":null,"rateLimitResetCredits":null}}'
+          ;;
+        *account*usage*read*)
+          if [ "$attempt" -eq 1 ]; then
+            printf '%s\n' '{"id":4,"error":{"code":-32603,"message":"temporary fixture failure"}}'
+          else
+            printf '%s\n' '{"id":4,"result":{"summary":{"lifetimeTokens":4200},"dailyUsageBuckets":[{"startDate":"2026-09-01","tokens":900}],"threadUsage":null}}'
+          fi
+          ;;
+        *account*read*)
+          printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.com","planType":"pro"},"requiresOpenaiAuth":true}}'
+          ;;
+      esac
+    done
+    """#
+
+    private static let telemetryAlwaysRPCFailureFixtureScript = #"""
+    #!/bin/sh
+    attempt_file="$CODEX_HOME/fixture-attempt"
+    pids_file="$CODEX_HOME/fixture-pids"
+    attempt=1
+    if [ -f "$attempt_file" ]; then
+      attempt=$(( $(cat "$attempt_file") + 1 ))
+    fi
+    printf '%s\n' "$attempt" > "$attempt_file"
+    printf '%s\n' "$$" >> "$pids_file"
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialized"'*)
+          ;;
+        *'"method":"initialize"'*)
+          printf '{"id":1,"result":{"userAgent":"fixture","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}\n' "$CODEX_HOME"
+          ;;
+        *account*rateLimits*read*)
+          printf '%s\n' '{"id":3,"error":{"code":-32603,"message":"temporary fixture failure"}}'
           ;;
         *account*read*)
           printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.com","planType":"pro"},"requiresOpenaiAuth":true}}'

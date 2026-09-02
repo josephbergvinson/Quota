@@ -141,7 +141,7 @@ Provider code depends on core models, never on SwiftUI or AppKit. The weekly pla
 
 - OpenAI API activity currently covers the completions usage resource plus total organization cost; other service-specific usage resources can be added independently.
 - API rate-limit endpoints generally expose configured ceilings, not an exact live remaining token bucket, so Quota does not present them as live capacity.
-- The ChatGPT integration uses Codex's documented app-server interface, which Codex currently labels experimental. Connection failures are shown and never replaced by guessed values.
+- The ChatGPT integration uses Codex's documented app-server interface, which Codex currently labels experimental. Read-only refreshes retry one transient timeout or internal service error in a fresh process; persistent connection failures are shown and never replaced by guessed values.
 - Readings older than six hours remain visible as historical values but are marked stale and excluded from “best account” recommendations until refreshed or recorded again.
 - Account history stays on the current Mac; there is no built-in device sync.
 - Public downloads are ad-hoc signed rather than Developer ID signed or notarized, so first launch requires the Gatekeeper step described above.

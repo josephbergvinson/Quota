@@ -15,7 +15,8 @@ public protocol ChatGPTAppServerConnecting: Sendable {
 
 public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
     private static let maximumReadAttempts = 2
-    private static let readRetryDelay: Duration = .milliseconds(250)
+    private static let readRetryDelay: Duration = .milliseconds(500)
+    private static let retryableRPCFailureCodes: Set<Int> = [-32_603]
 
     public nonisolated let configuration: ChatGPTAppServerConfiguration
 
@@ -125,7 +126,7 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 )
             }
         }
-        return try await retryingTimedOutRead { [self] in
+        return try await retryingTransientRead { [self] in
             try await readTelemetryWithoutAuthenticationGate(
                 refreshToken: false,
                 capturedAt: capturedAt
@@ -201,10 +202,10 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
         }
     }
 
-    /// Read-only app-server calls can occasionally stall while Codex fetches provider data.
-    /// Retrying in a new initialized process is safe and avoids reusing a session whose late
-    /// response could otherwise be mistaken for the retry's response.
-    private func retryingTimedOutRead<Result: Sendable>(
+    /// Read-only app-server calls can occasionally time out or return a transient internal error
+    /// while Codex fetches provider data. Retrying in a new initialized process is safe and avoids
+    /// reusing a session whose late response could otherwise be mistaken for the retry's response.
+    private func retryingTransientRead<Result: Sendable>(
         _ operation: () async throws -> Result
     ) async throws -> Result {
         var attempt = 1
@@ -213,7 +214,7 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 return try await operation()
             } catch let error as ChatGPTConnectorError {
                 guard
-                    case .requestTimedOut = error,
+                    Self.isRetryableReadError(error),
                     attempt < Self.maximumReadAttempts
                 else {
                     throw error
@@ -221,6 +222,17 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 attempt += 1
                 try await Task.sleep(for: Self.readRetryDelay)
             }
+        }
+    }
+
+    private static func isRetryableReadError(_ error: ChatGPTConnectorError) -> Bool {
+        switch error {
+        case .requestTimedOut:
+            true
+        case let .rpcFailure(code):
+            retryableRPCFailureCodes.contains(code)
+        default:
+            false
         }
     }
 
