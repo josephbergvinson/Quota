@@ -14,7 +14,7 @@ struct ResetPlannerView: View {
 
     private var days: [Date] {
         guard let start = resetInterval?.start else { return [] }
-        return (0..<7).compactMap { offset in
+        return (0..<8).compactMap { offset in
             calendar.date(byAdding: .day, value: offset, to: start)
         }
     }

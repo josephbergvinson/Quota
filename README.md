@@ -89,7 +89,7 @@ Provider documentation:
 
 ## Reset planner
 
-The Reset Planner is a compact rolling seven-day calendar in the Mac's current time zone. It starts today and shows the following six days; past dates are not included. It shows:
+The Reset Planner is a compact rolling one-week-ahead calendar in the Mac's current time zone. It starts today and includes the same weekday next week; past dates are not included. It shows:
 
 - each reported reset time;
 - the account and provider;

@@ -300,7 +300,7 @@ public enum UsageAnalytics {
         calendar: Calendar
     ) -> DateInterval? {
         let anchorDay = calendar.startOfDay(for: referenceDate)
-        guard let end = calendar.date(byAdding: .day, value: 7, to: anchorDay) else {
+        guard let end = calendar.date(byAdding: .day, value: 8, to: anchorDay) else {
             return nil
         }
         return DateInterval(start: anchorDay, end: end)

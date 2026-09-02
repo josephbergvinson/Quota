@@ -121,7 +121,7 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertEqual(capacity.nextResetAt, limitingReset)
     }
 
-    func testForwardResetIntervalIncludesAnchorAndNextSixCalendarDays() throws {
+    func testForwardResetIntervalIncludesAnchorAndNextSevenCalendarDays() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let referenceDate = try XCTUnwrap(
@@ -132,15 +132,15 @@ final class UsageAnalyticsTests: XCTestCase {
         let interval = try XCTUnwrap(
             UsageAnalytics.forwardResetInterval(startingAt: referenceDate, calendar: calendar)
         )
-        let includedDays = (0..<7).compactMap {
+        let includedDays = (0..<8).compactMap {
             calendar.date(byAdding: .day, value: $0, to: interval.start)
         }
 
         XCTAssertEqual(interval.start, anchorDay)
-        XCTAssertEqual(interval.end, calendar.date(byAdding: .day, value: 7, to: anchorDay))
-        XCTAssertEqual(includedDays.count, 7)
+        XCTAssertEqual(interval.end, calendar.date(byAdding: .day, value: 8, to: anchorDay))
+        XCTAssertEqual(includedDays.count, 8)
         XCTAssertEqual(includedDays.first, interval.start)
-        XCTAssertEqual(includedDays.last, calendar.date(byAdding: .day, value: 6, to: anchorDay))
+        XCTAssertEqual(includedDays.last, calendar.date(byAdding: .day, value: 7, to: anchorDay))
         XCTAssertEqual(
             calendar.date(byAdding: .day, value: 1, to: try XCTUnwrap(includedDays.last)),
             interval.end
@@ -167,8 +167,8 @@ final class UsageAnalyticsTests: XCTestCase {
         )
 
         XCTAssertEqual(startComponents, DateComponents(year: 2026, month: 3, day: 8, hour: 0))
-        XCTAssertEqual(endComponents, DateComponents(year: 2026, month: 3, day: 15, hour: 0))
-        XCTAssertEqual(interval.duration, 7 * 24 * 60 * 60 - 60 * 60, accuracy: 0.001)
+        XCTAssertEqual(endComponents, DateComponents(year: 2026, month: 3, day: 16, hour: 0))
+        XCTAssertEqual(interval.duration, 8 * 24 * 60 * 60 - 60 * 60, accuracy: 0.001)
     }
 
     func testExpiredWindowIsNotPresentedAsCurrentCapacity() throws {
