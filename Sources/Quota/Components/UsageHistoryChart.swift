@@ -19,6 +19,8 @@ struct UsageHistoryChart: View {
 
     let points: [DailyUsagePoint]
     var tint: Color = .accentColor
+    var costIsComplete = true
+    var costQualification: String?
     @State private var metric: Metric = .tokens
     @State private var presentation: Presentation = .daily
 
@@ -40,7 +42,7 @@ struct UsageHistoryChart: View {
     }
 
     private var supportsCost: Bool {
-        points.contains { $0.costUSD > 0 }
+        costIsComplete && points.contains { $0.costUSD > 0 }
     }
 
     private var chartPoints: [DailyUsagePoint] {
@@ -236,7 +238,7 @@ struct UsageHistoryChart: View {
     }
 
     private var chartDescription: String {
-        switch (effectiveMetric, presentation) {
+        let description = switch (effectiveMetric, presentation) {
         case (.tokens, .daily):
             hasTokenBreakdown
                 ? "Provider-reported daily tokens, stacked by available type"
@@ -248,6 +250,10 @@ struct UsageHistoryChart: View {
         case (.cost, .cumulative):
             "Running total of provider-reported cost in the selected range"
         }
+        if effectiveMetric == .cost, let costQualification {
+            return "\(description) · \(costQualification)"
+        }
+        return description
     }
 
     private var chartAccessibilityLabel: String {

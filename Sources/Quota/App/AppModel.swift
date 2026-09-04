@@ -16,7 +16,7 @@ enum AccountRefreshState: Equatable {
     case failed(String)
 }
 
-enum ChatGPTConnectionState: Equatable {
+enum ManagedAccountConnectionState: Equatable {
     case idle
     case starting
     case waitingInBrowser
@@ -61,6 +61,7 @@ struct PresentedError: Identifiable {
 
 private struct ProviderIdentityPresentation: Equatable {
     let accountLabel: String?
+    let identityKey: String?
     let planLabel: String?
 }
 
@@ -71,11 +72,11 @@ final class AppModel: ObservableObject {
     @Published var selection: AppRoute? = .overview
     @Published var refreshStates: [UUID: AccountRefreshState] = [:]
     @Published var refreshWarnings: [UUID: String] = [:]
-    @Published var chatGPTIdentityWarnings: [UUID: String] = [:]
+    @Published var identityWarnings: [UUID: String] = [:]
     @Published var presentedError: PresentedError?
     @Published var isShowingAddAccount = false
     @Published var editingAccount: ConnectedAccount?
-    @Published var chatGPTConnectionStates: [UUID: ChatGPTConnectionState] = [:]
+    @Published var connectionStates: [UUID: ManagedAccountConnectionState] = [:]
     @Published private(set) var automaticRefreshInterval: AutomaticRefreshInterval
     @Published private(set) var now = Date()
 
@@ -84,9 +85,11 @@ final class AppModel: ObservableObject {
     private let repository: QuotaRepository?
     private let refreshService: UsageRefreshService?
     private let chatGPTProvider: ChatGPTUsageProvider?
+    private let claudeProvider: ClaudeCodeUsageProvider?
     private var automaticRefreshTask: Task<Void, Never>?
     private var clockTask: Task<Void, Never>?
     private var chatGPTLoginSessions: [UUID: ChatGPTManagedLoginSession] = [:]
+    private var claudeLoginSessions: [UUID: ClaudeCodeManagedLoginSession] = [:]
     private var providerIdentities: [UUID: ProviderIdentityPresentation] = [:]
     private var accountIDsPendingRemoval: Set<UUID> = []
     private var didStart = false
@@ -110,19 +113,26 @@ final class AppModel: ObservableObject {
                 accountsDirectoryURL: dataStore.directoryURL
                     .appendingPathComponent("ChatGPTAccounts", isDirectory: true)
             )
+            let claudeProvider = ClaudeCodeUsageProvider(
+                accountsDirectoryURL: dataStore.directoryURL
+                    .appendingPathComponent("ClaudeAccounts", isDirectory: true)
+            )
             self.repository = QuotaRepository(dataStore: dataStore, credentialStore: credentialStore)
             self.refreshService = UsageRefreshService(
                 registry: UsageProviderRegistry(
-                    chatGPTAccountsDirectoryURL: chatGPTProvider.accountsDirectoryURL
+                    chatGPTAccountsDirectoryURL: chatGPTProvider.accountsDirectoryURL,
+                    claudeCodeAccountsDirectoryURL: claudeProvider.accountsDirectoryURL
                 ),
                 credentialStore: credentialStore
             )
             self.chatGPTProvider = chatGPTProvider
+            self.claudeProvider = claudeProvider
             self.dataDirectoryURL = dataStore.directoryURL
         } catch {
             self.repository = nil
             self.refreshService = nil
             self.chatGPTProvider = nil
+            self.claudeProvider = nil
             self.dataDirectoryURL = nil
             self.presentedError = PresentedError(
                 title: "Quota could not start",
@@ -157,6 +167,30 @@ final class AppModel: ObservableObject {
         )
     }
 
+    var recommendedAccount: AccountCapacity? {
+        dashboardSummary.capacities
+            .filter {
+                $0.remainingFraction != nil
+                    && !$0.isStale
+                    && identityWarnings[$0.account.id] == nil
+            }
+            .sorted { left, right in
+                guard
+                    let leftRemaining = left.remainingFraction,
+                    let rightRemaining = right.remainingFraction
+                else {
+                    return left.remainingFraction != nil
+                }
+                if leftRemaining == rightRemaining {
+                    return left.account.displayName.localizedStandardCompare(
+                        right.account.displayName
+                    ) == .orderedAscending
+                }
+                return leftRemaining > rightRemaining
+            }
+            .first
+    }
+
     var isRefreshing: Bool {
         refreshStates.values.contains(.refreshing)
     }
@@ -174,11 +208,11 @@ final class AppModel: ObservableObject {
             state = try await repository.load()
             for account in state.accounts {
                 refreshStates[account.id] = .idle
-                if account.kind == .chatGPTPro {
-                    chatGPTConnectionStates[account.id] = .idle
+                if account.kind.isManagedSubscription {
+                    connectionStates[account.id] = .idle
                 }
             }
-            updateChatGPTIdentityWarnings()
+            updateIdentityWarnings()
         } catch {
             show(error: error, title: "Could not load local data")
         }
@@ -210,15 +244,34 @@ final class AppModel: ObservableObject {
             )
             refreshStates[account.id] = .idle
             selection = .account(account.id)
-            if account.kind == .chatGPTPro {
-                chatGPTConnectionStates[account.id] = .idle
+            if account.kind.isChatGPTSubscription {
+                connectionStates[account.id] = .idle
                 Task { [weak self] in
                     await self?.connectChatGPT(accountID: account.id)
+                }
+            } else if account.kind.isClaudeSubscription {
+                connectionStates[account.id] = .idle
+                Task { [weak self] in
+                    await self?.connectClaude(accountID: account.id)
                 }
             } else {
                 await refresh(accountID: account.id)
             }
             return true
+        } catch QuotaRepositoryError.credentialSaveFailedAccountRetained {
+            do {
+                state = try await repository.load()
+                refreshStates[account.id] = .idle
+                selection = .account(account.id)
+                show(
+                    error: QuotaRepositoryError.credentialSaveFailedAccountRetained,
+                    title: "Account needs its Admin API key"
+                )
+                return true
+            } catch {
+                show(error: error, title: "Could not reload the saved account")
+                return false
+            }
         } catch {
             show(error: error, title: "Could not add account")
             return false
@@ -236,8 +289,8 @@ final class AppModel: ObservableObject {
                 account: account,
                 replacementCredential: replacementCredential
             )
-            if account.kind == .chatGPTPro {
-                updateChatGPTIdentityWarnings()
+            if account.kind.isManagedSubscription {
+                updateIdentityWarnings()
             }
             return true
         } catch {
@@ -256,75 +309,93 @@ final class AppModel: ObservableObject {
         }
         accountIDsPendingRemoval.insert(account.id)
         defer { accountIDsPendingRemoval.remove(account.id) }
-        var cleanupWarnings: [String] = []
-        var providerCredentialCleanupFailed = false
-        if account.kind == .chatGPTPro, let session = chatGPTLoginSessions[account.id] {
-            do {
-                try await session.cancel()
-            } catch {
-                cleanupWarnings.append(
-                    "The active ChatGPT sign-in could not be cleanly cancelled."
-                )
-            }
-            chatGPTLoginSessions[account.id] = nil
-        }
+        var retiredChatGPTHomeURL: URL?
+        var retiredClaudeConfigurationURL: URL?
+        var failureContext = "Quota could not finish removing this account."
 
         do {
-            let removal = try await repository.remove(accountID: account.id)
-            state = removal.state
-            if removal.credentialCleanupFailed, account.kind.requiresCredential {
-                providerCredentialCleanupFailed = true
-                cleanupWarnings.append(
-                    "The saved Admin API key could not be removed from macOS Keychain."
-                )
+            if account.kind.isChatGPTSubscription,
+               let session = chatGPTLoginSessions[account.id] {
+                failureContext = "Quota could not cancel the active ChatGPT sign-in."
+                chatGPTLoginSessions[account.id] = nil
+                try await session.cancel()
             }
-            refreshStates[account.id] = nil
-            refreshWarnings[account.id] = nil
-            chatGPTConnectionStates[account.id] = nil
-            providerIdentities[account.id] = nil
-            updateChatGPTIdentityWarnings()
-            selection = .overview
-        } catch {
-            if self.account(withID: account.id) != nil {
-                refreshStates[account.id] = .idle
+            if account.kind.isClaudeSubscription,
+               let session = claudeLoginSessions[account.id] {
+                await session.cancel()
+                claudeLoginSessions[account.id] = nil
             }
-            show(error: error, title: "Could not remove account")
-            return
-        }
 
-        if account.kind == .chatGPTPro, let chatGPTProvider {
-            do {
+            if account.kind.isChatGPTSubscription {
+                guard let chatGPTProvider else {
+                    throw AccountRemovalError.providerUnavailable
+                }
+                failureContext = "Codex could not confirm that the managed ChatGPT session was signed out."
                 let connector = try chatGPTProvider.connector(for: account.id)
-                try await connector.logout()
-            } catch {
-                cleanupWarnings.append(
-                    "Codex could not confirm that its Keychain session was signed out."
-                )
-            }
+                let homeURL = connector.configuration.codexHomeURL
+                retiredChatGPTHomeURL = homeURL
+                try await connector.retireAndLogout()
 
-            let homeURL = chatGPTProvider.codexHomeURL(for: account.id)
-            if FileManager.default.fileExists(atPath: homeURL.path) {
-                do {
+                failureContext = "Quota could not delete the isolated ChatGPT profile."
+                if FileManager.default.fileExists(atPath: homeURL.path) {
                     try FileManager.default.removeItem(at: homeURL)
-                } catch {
-                    cleanupWarnings.append(
-                        "Some local ChatGPT connector files could not be removed."
-                    )
+                }
+            } else if account.kind.isClaudeSubscription {
+                guard let claudeProvider else {
+                    throw AccountRemovalError.providerUnavailable
+                }
+                let configurationURL = claudeProvider.configurationDirectoryURL(for: account.id)
+                retiredClaudeConfigurationURL = configurationURL
+                failureContext = "Claude Code could not confirm that the managed session was signed out."
+                let connector = try claudeProvider.connector(for: account.id)
+                try await connector.retireAndLogout()
+
+                failureContext = "Quota could not delete the isolated Claude profile."
+                if FileManager.default.fileExists(atPath: configurationURL.path) {
+                    try FileManager.default.removeItem(at: configurationURL)
                 }
             }
-        }
 
-        if !cleanupWarnings.isEmpty {
-            var message = cleanupWarnings.joined(separator: " ")
-            if account.kind == .chatGPTPro {
-                message += " If needed, remove the matching “Codex Auth” item in Keychain Access."
-            } else if providerCredentialCleanupFailed {
-                message += " If needed, remove the matching Quota provider credential in Keychain Access."
+            failureContext = account.kind.requiresCredential
+                ? "Quota could not remove the saved Admin API key or update local account data."
+                : "Quota could not update local account data after cleaning up the managed profile."
+            let removal = try await repository.remove(accountID: account.id)
+            state = removal.state
+            refreshStates[account.id] = nil
+            refreshWarnings[account.id] = nil
+            connectionStates[account.id] = nil
+            providerIdentities[account.id] = nil
+            updateIdentityWarnings()
+            selection = .overview
+        } catch {
+            if let retiredChatGPTHomeURL {
+                await ChatGPTAppServerConnector.reactivateProfile(
+                    codexHomeURL: retiredChatGPTHomeURL
+                )
+                connectionStates[account.id] = .idle
+            }
+            if let retiredClaudeConfigurationURL {
+                await ClaudeCodeConnector.reactivateProfile(
+                    configurationDirectoryURL: retiredClaudeConfigurationURL
+                )
+                connectionStates[account.id] = .idle
+            }
+            if self.account(withID: account.id) != nil {
+                refreshStates[account.id] = .idle
+                if account.kind.isManagedSubscription {
+                    connectionStates[account.id] = .idle
+                }
             }
             presentedError = PresentedError(
-                title: "Account removed with a cleanup warning",
-                message: message
+                title: "Account not removed",
+                message: [
+                    failureContext,
+                    "Quota kept the account and its local history.",
+                    "Try Remove Account again.",
+                    error.localizedDescription
+                ].joined(separator: " ")
             )
+            return
         }
     }
 
@@ -333,7 +404,7 @@ final class AppModel: ObservableObject {
         guard !isRefreshing else { return }
         let refreshableAccounts = accounts.filter { account in
             !accountIDsPendingRemoval.contains(account.id)
-                && chatGPTConnectionStates[account.id]?.isInProgress != true
+                && connectionStates[account.id]?.isInProgress != true
         }
         guard !refreshableAccounts.isEmpty else { return }
 
@@ -359,14 +430,17 @@ final class AppModel: ObservableObject {
                 switch result {
                 case let .success(fetchResult):
                     do {
-                        let refreshedState = try await repository.record(snapshot: fetchResult.snapshot)
+                        let refreshedState = try await repository.record(
+                            snapshot: fetchResult.snapshot,
+                            resolvedAccountKind: fetchResult.resolvedAccountKind
+                        )
                         guard canAcceptRefreshResult(for: account.id) else { continue }
                         state = refreshedState
                         refreshStates[account.id] = .refreshed(fetchResult.snapshot.capturedAt)
-                        if account.kind == .chatGPTPro {
-                            chatGPTConnectionStates[account.id] = .connected
+                        if account.kind.isManagedSubscription {
+                            connectionStates[account.id] = .connected
                             updateProviderIdentity(from: fetchResult, accountID: account.id)
-                            updateChatGPTIdentityWarnings()
+                            updateIdentityWarnings()
                         }
                         refreshWarnings[account.id] = fetchResult.warnings.first
                     } catch {
@@ -388,7 +462,7 @@ final class AppModel: ObservableObject {
             let repository,
             !accountIDsPendingRemoval.contains(accountID),
             refreshStates[accountID] != .refreshing,
-            chatGPTConnectionStates[accountID]?.isInProgress != true
+            connectionStates[accountID]?.isInProgress != true
         else {
             return
         }
@@ -398,14 +472,17 @@ final class AppModel: ObservableObject {
         do {
             let result = try await refreshService.refresh(account: account)
             guard canAcceptRefreshResult(for: account.id) else { return }
-            let refreshedState = try await repository.record(snapshot: result.snapshot)
+            let refreshedState = try await repository.record(
+                snapshot: result.snapshot,
+                resolvedAccountKind: result.resolvedAccountKind
+            )
             guard canAcceptRefreshResult(for: account.id) else { return }
             state = refreshedState
             refreshStates[account.id] = .refreshed(result.snapshot.capturedAt)
-            if account.kind == .chatGPTPro {
-                chatGPTConnectionStates[account.id] = .connected
+            if account.kind.isManagedSubscription {
+                connectionStates[account.id] = .connected
                 updateProviderIdentity(from: result, accountID: account.id)
-                updateChatGPTIdentityWarnings()
+                updateIdentityWarnings()
             }
             refreshWarnings[account.id] = result.warnings.first
         } catch {
@@ -417,23 +494,32 @@ final class AppModel: ObservableObject {
     func connectChatGPT(accountID: UUID) async {
         guard
             let account = account(withID: accountID),
-            account.kind == .chatGPTPro,
+            account.kind.isChatGPTSubscription,
             let chatGPTProvider,
-            chatGPTConnectionStates[accountID]?.isInProgress != true,
+            connectionStates[accountID]?.isInProgress != true,
             refreshStates[accountID] != .refreshing
         else {
             return
         }
 
-        chatGPTConnectionStates[accountID] = .starting
+        connectionStates[accountID] = .starting
+        providerIdentities[accountID] = nil
+        updateIdentityWarnings()
         do {
             let connector = try chatGPTProvider.connector(for: accountID)
             let loginSession = try await connector.startManagedLogin(mode: .browser)
+            guard
+                canAcceptRefreshResult(for: accountID),
+                connectionStates[accountID] == .starting
+            else {
+                try await loginSession.cancel()
+                return
+            }
             chatGPTLoginSessions[accountID] = loginSession
 
             switch loginSession.flow {
             case let .browser(_, authorizationURL):
-                chatGPTConnectionStates[accountID] = .waitingInBrowser
+                connectionStates[accountID] = .waitingInBrowser
                 guard NSWorkspace.shared.open(authorizationURL) else {
                     try await loginSession.cancel()
                     throw ChatGPTLoginPresentationError.couldNotOpenBrowser
@@ -448,36 +534,136 @@ final class AppModel: ObservableObject {
 
             let completion = try await loginSession.waitForCompletion()
             chatGPTLoginSessions[accountID] = nil
+            guard
+                canAcceptRefreshResult(for: accountID),
+                connectionStates[accountID] == .waitingInBrowser
+            else {
+                return
+            }
             guard completion.succeeded else {
                 throw ChatGPTLoginPresentationError.providerRejected(
                     completion.errorMessage ?? "ChatGPT sign-in did not complete."
                 )
             }
-            chatGPTConnectionStates[accountID] = .connected
+            connectionStates[accountID] = .connected
             await refresh(accountID: accountID)
         } catch {
             chatGPTLoginSessions[accountID] = nil
             guard
                 self.account(withID: accountID) != nil,
-                let connectionState = chatGPTConnectionStates[accountID],
+                let connectionState = connectionStates[accountID],
                 connectionState != .idle
             else {
                 return
             }
-            chatGPTConnectionStates[accountID] = .failed(error.localizedDescription)
-            refreshStates[accountID] = .failed(error.localizedDescription)
+            connectionStates[accountID] = .failed(error.localizedDescription)
+            refreshStates[accountID] = .idle
         }
     }
 
     func cancelChatGPTLogin(accountID: UUID) async {
-        guard let session = chatGPTLoginSessions[accountID] else { return }
+        let session = chatGPTLoginSessions[accountID]
         chatGPTLoginSessions[accountID] = nil
-        chatGPTConnectionStates[accountID] = .idle
+        connectionStates[accountID] = .idle
         refreshStates[accountID] = .idle
+        guard let session else { return }
         do {
             try await session.cancel()
         } catch {
             show(error: error, title: "Could not cancel ChatGPT sign-in")
+        }
+    }
+
+    func connectClaude(accountID: UUID) async {
+        guard
+            let account = account(withID: accountID),
+            account.kind.isClaudeSubscription,
+            let claudeProvider,
+            connectionStates[accountID]?.isInProgress != true,
+            refreshStates[accountID] != .refreshing
+        else {
+            return
+        }
+
+        connectionStates[accountID] = .starting
+        providerIdentities[accountID] = nil
+        updateIdentityWarnings()
+        do {
+            let connector = try claudeProvider.connector(for: accountID)
+            let loginSession = try await connector.startManagedLogin()
+            guard
+                canAcceptRefreshResult(for: accountID),
+                connectionStates[accountID] == .starting
+            else {
+                await loginSession.cancel()
+                return
+            }
+            claudeLoginSessions[accountID] = loginSession
+            connectionStates[accountID] = .waitingInBrowser
+            _ = try await loginSession.waitForCompletion()
+            claudeLoginSessions[accountID] = nil
+            guard
+                canAcceptRefreshResult(for: accountID),
+                connectionStates[accountID] == .waitingInBrowser
+            else {
+                return
+            }
+            connectionStates[accountID] = .connected
+            await refresh(accountID: accountID)
+        } catch {
+            claudeLoginSessions[accountID] = nil
+            guard
+                self.account(withID: accountID) != nil,
+                let connectionState = connectionStates[accountID],
+                connectionState != .idle
+            else {
+                return
+            }
+            connectionStates[accountID] = .failed(error.localizedDescription)
+            refreshStates[accountID] = .idle
+        }
+    }
+
+    func cancelClaudeLogin(accountID: UUID) async {
+        let session = claudeLoginSessions[accountID]
+        claudeLoginSessions[accountID] = nil
+        connectionStates[accountID] = .idle
+        refreshStates[accountID] = .idle
+        guard let session else { return }
+        await session.cancel()
+    }
+
+    func openClaudeCodeFallback(accountID: UUID) async {
+        guard
+            connectionStates[accountID] == .waitingInBrowser,
+            let session = claudeLoginSessions[accountID]
+        else {
+            return
+        }
+        do {
+            let authorizationURL = try await session.manualAuthorizationURL()
+            guard NSWorkspace.shared.open(authorizationURL) else {
+                throw ClaudeLoginPresentationError.couldNotOpenBrowser
+            }
+        } catch {
+            show(error: error, title: "Could not open code-based sign-in")
+        }
+    }
+
+    @discardableResult
+    func submitClaudeCodeFallback(accountID: UUID, code: String) async -> Bool {
+        guard
+            connectionStates[accountID] == .waitingInBrowser,
+            let session = claudeLoginSessions[accountID]
+        else {
+            return false
+        }
+        do {
+            try await session.submitManualAuthorizationCode(code)
+            return true
+        } catch {
+            show(error: error, title: "Could not submit Claude sign-in code")
+            return false
         }
     }
 
@@ -536,28 +722,33 @@ final class AppModel: ObservableObject {
         presentedError = PresentedError(title: title, message: error.localizedDescription)
     }
 
-    private func updateChatGPTIdentityWarnings() {
-        let chatGPTAccounts = state.accounts.filter { $0.kind == .chatGPTPro }
-        let accountsByIdentity = Dictionary(grouping: chatGPTAccounts) { account in
-            providerIdentities[account.id]?
-                .accountLabel?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
+    private func updateIdentityWarnings() {
+        var warnings: [UUID: String] = [:]
+        let identityKeys = providerIdentities.compactMapValues(\.identityKey)
+        let assessment = UsageAnalytics.managedAccountIdentityAssessment(
+            accounts: state.accounts,
+            identityKeys: identityKeys
+        )
+        let accountsByID = Dictionary(uniqueKeysWithValues: state.accounts.map { ($0.id, $0) })
+
+        for accountID in assessment.unverifiedAccountIDs {
+            guard let account = accountsByID[accountID] else { continue }
+            let serviceName = account.kind.isClaudeSubscription ? "Claude" : "ChatGPT"
+            warnings[accountID] = "Quota could not verify which \(serviceName) subscription this session belongs to. Refresh or reconnect it before relying on rotation advice."
         }
 
-        var warnings: [UUID: String] = [:]
-        for (identity, matchingAccounts) in accountsByIdentity {
-            guard identity != nil, matchingAccounts.count > 1 else { continue }
-            for account in matchingAccounts {
-                let otherNames = matchingAccounts
-                    .filter { $0.id != account.id }
-                    .map(\.displayName)
-                    .sorted()
-                    .joined(separator: ", ")
-                warnings[account.id] = "This ChatGPT identity is also connected as \(otherNames). Sign each Quota account into a different ChatGPT plan before relying on rotation advice."
+        for (accountID, duplicateIDs) in assessment.duplicateAccountIDsByAccount {
+            guard let account = accountsByID[accountID] else { continue }
+            let otherNames = duplicateIDs
+                .compactMap { accountsByID[$0]?.displayName }
+                .sorted()
+                .joined(separator: ", ")
+            if !otherNames.isEmpty {
+                let serviceName = account.kind.isClaudeSubscription ? "Claude" : "ChatGPT"
+                warnings[accountID] = "This \(serviceName) identity is also connected as \(otherNames). Sign each Quota account into a different subscription before relying on rotation advice."
             }
         }
-        chatGPTIdentityWarnings = warnings
+        identityWarnings = warnings
     }
 
     private func updateProviderIdentity(
@@ -566,8 +757,18 @@ final class AppModel: ObservableObject {
     ) {
         providerIdentities[accountID] = ProviderIdentityPresentation(
             accountLabel: result.providerAccountLabel,
+            identityKey: result.providerIdentityKey,
             planLabel: result.providerPlanLabel
         )
+    }
+
+}
+
+private enum AccountRemovalError: LocalizedError {
+    case providerUnavailable
+
+    var errorDescription: String? {
+        "The local provider connection is unavailable. Restart Quota and try again."
     }
 }
 
@@ -585,5 +786,13 @@ private enum ChatGPTLoginPresentationError: LocalizedError {
         case let .providerRejected(message):
             message
         }
+    }
+}
+
+private enum ClaudeLoginPresentationError: LocalizedError {
+    case couldNotOpenBrowser
+
+    var errorDescription: String? {
+        "Quota could not open Claude's code-based sign-in page."
     }
 }

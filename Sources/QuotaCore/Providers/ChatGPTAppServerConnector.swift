@@ -1,6 +1,6 @@
 import Foundation
 
-/// A provider boundary for supported ChatGPT Pro/Codex telemetry exposed by `codex app-server`.
+/// A provider boundary for supported ChatGPT Plus and Pro telemetry exposed by `codex app-server`.
 ///
 /// Every connector instance is scoped to one canonical `CODEX_HOME`. Callers should create a
 /// distinct account directory (and connector) for every ChatGPT account they manage.
@@ -13,12 +13,162 @@ public protocol ChatGPTAppServerConnecting: Sendable {
     func logout() async throws
 }
 
+struct ChatGPTProfileOperationLease: Equatable, Sendable {
+    let profileKey: String
+    let id: UUID
+}
+
+/// Serializes every Codex process that can touch one managed ChatGPT profile. Retirement is
+/// sticky: it rejects queued and future work before waiting for the active operation to finish,
+/// so no late process can recreate profile state after account removal deletes the directory.
+actor ChatGPTProfileOperationCoordinator {
+    static let shared = ChatGPTProfileOperationCoordinator()
+
+    private struct Waiter {
+        let id: UUID
+        let isRetirement: Bool
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private var activeLeaseIDs: [String: UUID] = [:]
+    private var retiredProfileKeys = Set<String>()
+    private var waitersByProfileKey: [String: [Waiter]] = [:]
+
+    func acquire(profileKey: String) async -> ChatGPTProfileOperationLease? {
+        guard !Task.isCancelled else { return nil }
+        guard !retiredProfileKeys.contains(profileKey) else { return nil }
+        guard activeLeaseIDs[profileKey] == nil else {
+            return await waitForLease(profileKey: profileKey)
+        }
+
+        let lease = ChatGPTProfileOperationLease(profileKey: profileKey, id: UUID())
+        activeLeaseIDs[profileKey] = lease.id
+        return lease
+    }
+
+    func retireAndAcquire(profileKey: String) async -> ChatGPTProfileOperationLease {
+        retiredProfileKeys.insert(profileKey)
+
+        let existingWaiters = waitersByProfileKey.removeValue(forKey: profileKey) ?? []
+        let retirementWaiters = existingWaiters.filter(\.isRetirement)
+        existingWaiters
+            .filter { !$0.isRetirement }
+            .forEach { $0.continuation.resume(returning: false) }
+        waitersByProfileKey[profileKey] = retirementWaiters.isEmpty ? nil : retirementWaiters
+
+        if activeLeaseIDs[profileKey] == nil, retirementWaiters.isEmpty {
+            let lease = ChatGPTProfileOperationLease(profileKey: profileKey, id: UUID())
+            activeLeaseIDs[profileKey] = lease.id
+            return lease
+        }
+
+        let waiterID = UUID()
+        let acquired = await withCheckedContinuation { continuation in
+            waitersByProfileKey[profileKey, default: []].append(
+                Waiter(
+                    id: waiterID,
+                    isRetirement: true,
+                    continuation: continuation
+                )
+            )
+        }
+        precondition(acquired, "A profile-retirement lease cannot be rejected")
+        return ChatGPTProfileOperationLease(profileKey: profileKey, id: waiterID)
+    }
+
+    func release(_ lease: ChatGPTProfileOperationLease) {
+        guard activeLeaseIDs[lease.profileKey] == lease.id else { return }
+
+        var waiters = waitersByProfileKey[lease.profileKey] ?? []
+        while !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            if retiredProfileKeys.contains(lease.profileKey), !next.isRetirement {
+                next.continuation.resume(returning: false)
+                continue
+            }
+
+            let nextLease = ChatGPTProfileOperationLease(
+                profileKey: lease.profileKey,
+                id: next.id
+            )
+            activeLeaseIDs[lease.profileKey] = nextLease.id
+            waitersByProfileKey[lease.profileKey] = waiters.isEmpty ? nil : waiters
+            next.continuation.resume(returning: true)
+            return
+        }
+
+        activeLeaseIDs.removeValue(forKey: lease.profileKey)
+        waitersByProfileKey[lease.profileKey] = nil
+    }
+
+    func reactivate(profileKey: String) {
+        retiredProfileKeys.remove(profileKey)
+    }
+
+    func isRetired(profileKey: String) -> Bool {
+        retiredProfileKeys.contains(profileKey)
+    }
+
+    func queuedOperationCount(profileKey: String) -> Int {
+        waitersByProfileKey[profileKey]?.count ?? 0
+    }
+
+    private func waitForLease(profileKey: String) async -> ChatGPTProfileOperationLease? {
+        let waiterID = UUID()
+        let acquired = await withTaskCancellationHandler {
+            if Task.isCancelled {
+                return false
+            }
+            return await withCheckedContinuation { continuation in
+                if Task.isCancelled || retiredProfileKeys.contains(profileKey) {
+                    continuation.resume(returning: false)
+                } else {
+                    waitersByProfileKey[profileKey, default: []].append(
+                        Waiter(
+                            id: waiterID,
+                            isRetirement: false,
+                            continuation: continuation
+                        )
+                    )
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID, profileKey: profileKey)
+            }
+        }
+
+        let lease = ChatGPTProfileOperationLease(profileKey: profileKey, id: waiterID)
+        if Task.isCancelled, acquired {
+            release(lease)
+            return nil
+        }
+        return acquired ? lease : nil
+    }
+
+    private func cancelWaiter(id: UUID, profileKey: String) {
+        guard
+            var waiters = waitersByProfileKey[profileKey],
+            let index = waiters.firstIndex(where: { $0.id == id })
+        else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waitersByProfileKey[profileKey] = waiters.isEmpty ? nil : waiters
+        waiter.continuation.resume(returning: false)
+    }
+}
+
 public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
     private static let maximumReadAttempts = 2
     private static let readRetryDelay: Duration = .milliseconds(500)
     private static let retryableRPCFailureCodes: Set<Int> = [-32_603]
 
     public nonisolated let configuration: ChatGPTAppServerConfiguration
+
+    private nonisolated var profileKey: String {
+        chatGPTProfileCoordinationKey(configuration.codexHomeURL)
+    }
 
     public init(configuration: ChatGPTAppServerConfiguration) {
         self.configuration = configuration
@@ -39,7 +189,7 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
     }
 
     public func readAccount(refreshToken: Bool = false) async throws -> ChatGPTAccountReadDTO {
-        let operation = { [self] in
+        try await withProfileAccess { [self] in
             try await withInitializedSession { session in
                 let raw: ChatGPTRawAccountReadResponse = try await session.request(
                     method: "account/read",
@@ -48,13 +198,9 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 return try raw.validatedDTO()
             }
         }
-        if refreshToken {
-            return try await withAuthenticationMutation(operation)
-        }
-        return try await operation()
     }
 
-    private func readTelemetryWithoutAuthenticationGate(
+    private func readTelemetryWithoutCoordination(
         refreshToken: Bool,
         capturedAt: Date
     ) async throws -> ChatGPTTelemetryDTO {
@@ -89,27 +235,31 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
     }
 
     public func readRateLimits() async throws -> ChatGPTRateLimitsDTO {
-        try await withInitializedSession { session in
-            let raw: ChatGPTRawRateLimitsResponse = try await session.request(
-                method: "account/rateLimits/read"
-            )
-            return try raw.validatedDTO()
+        try await withProfileAccess { [self] in
+            try await withInitializedSession { session in
+                let raw: ChatGPTRawRateLimitsResponse = try await session.request(
+                    method: "account/rateLimits/read"
+                )
+                return try raw.validatedDTO()
+            }
         }
     }
 
     public func readTokenUsage(threadID: String? = nil) async throws -> ChatGPTTokenUsageDTO {
         let normalizedThreadID = try validatedThreadID(threadID)
-        return try await withInitializedSession { session in
-            let raw: ChatGPTRawTokenUsageResponse
-            if let normalizedThreadID {
-                raw = try await session.request(
-                    method: "account/usage/read",
-                    params: ChatGPTUsageReadParams(threadId: normalizedThreadID)
-                )
-            } else {
-                raw = try await session.request(method: "account/usage/read")
+        return try await withProfileAccess { [self] in
+            try await withInitializedSession { session in
+                let raw: ChatGPTRawTokenUsageResponse
+                if let normalizedThreadID {
+                    raw = try await session.request(
+                        method: "account/usage/read",
+                        params: ChatGPTUsageReadParams(threadId: normalizedThreadID)
+                    )
+                } else {
+                    raw = try await session.request(method: "account/usage/read")
+                }
+                return try raw.validatedDTO()
             }
-            return try raw.validatedDTO()
         }
     }
 
@@ -118,19 +268,19 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
         refreshToken: Bool = false,
         capturedAt: Date = Date()
     ) async throws -> ChatGPTTelemetryDTO {
-        if refreshToken {
-            return try await withAuthenticationMutation { [self] in
-                try await readTelemetryWithoutAuthenticationGate(
+        try await withProfileAccess { [self] in
+            if refreshToken {
+                return try await readTelemetryWithoutCoordination(
                     refreshToken: true,
                     capturedAt: capturedAt
                 )
             }
-        }
-        return try await retryingTransientRead { [self] in
-            try await readTelemetryWithoutAuthenticationGate(
-                refreshToken: false,
-                capturedAt: capturedAt
-            )
+            return try await retryingTransientRead { [self] in
+                try await readTelemetryWithoutCoordination(
+                    refreshToken: false,
+                    capturedAt: capturedAt
+                )
+            }
         }
     }
 
@@ -139,18 +289,22 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
     public func startManagedLogin(
         mode: ChatGPTManagedLoginMode = .browser
     ) async throws -> ChatGPTManagedLoginSession {
-        let authenticationLease = try await ChatGPTAuthenticationOperationRegistry.shared.acquire(
-            codexHomePath: configuration.codexHomeURL.path
-        )
+        let profileLease = try await acquireProfileLease()
         let session: ChatGPTAppServerRPCSession
         do {
             session = try ChatGPTAppServerRPCSession.launch(configuration: configuration)
         } catch {
-            await ChatGPTAuthenticationOperationRegistry.shared.release(authenticationLease)
+            await ChatGPTProfileOperationCoordinator.shared.release(profileLease)
             throw error
         }
         do {
             _ = try await session.initialize(expectedCodexHomeURL: configuration.codexHomeURL)
+            try Task.checkCancellation()
+            guard await ChatGPTProfileOperationCoordinator.shared.isRetired(
+                profileKey: profileKey
+            ) == false else {
+                throw ChatGPTConnectorError.profileRetired
+            }
             let raw: ChatGPTRawLoginResponse
             switch mode {
             case .browser:
@@ -165,39 +319,87 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 )
             }
             let flow = try raw.validatedFlow(for: mode)
+            try Task.checkCancellation()
+            guard await ChatGPTProfileOperationCoordinator.shared.isRetired(
+                profileKey: profileKey
+            ) == false else {
+                throw ChatGPTConnectorError.profileRetired
+            }
             return ChatGPTManagedLoginSession(
                 flow: flow,
                 session: session,
                 defaultTimeoutSeconds: configuration.loginTimeoutSeconds,
-                authenticationLease: authenticationLease
+                profileLease: profileLease
             )
         } catch {
             await session.close()
-            await ChatGPTAuthenticationOperationRegistry.shared.release(authenticationLease)
+            await ChatGPTProfileOperationCoordinator.shared.release(profileLease)
             throw error
         }
     }
 
     public func logout() async throws {
-        try await withAuthenticationMutation { [self] in
-            try await withInitializedSession { session in
-                let _: ChatGPTEmptyResponse = try await session.request(method: "account/logout")
-            }
+        try await withProfileAccess { [self] in
+            try await logoutWithoutCoordination()
         }
     }
 
-    private func withAuthenticationMutation<Result: Sendable>(
-        _ operation: () async throws -> Result
-    ) async throws -> Result {
-        let lease = try await ChatGPTAuthenticationOperationRegistry.shared.acquire(
-            codexHomePath: configuration.codexHomeURL.path
+    /// Permanently blocks new profile work, waits for any in-flight read or login to finish, then
+    /// signs the profile out while holding exclusive access. Call `reactivateProfile` only when a
+    /// higher-level removal fails and keeps the account available for a retry.
+    public func retireAndLogout() async throws {
+        let lease = await ChatGPTProfileOperationCoordinator.shared.retireAndAcquire(
+            profileKey: profileKey
         )
         do {
+            try Task.checkCancellation()
+            try await logoutWithoutCoordination()
+            await ChatGPTProfileOperationCoordinator.shared.release(lease)
+        } catch {
+            await ChatGPTProfileOperationCoordinator.shared.release(lease)
+            throw error
+        }
+    }
+
+    public static func reactivateProfile(codexHomeURL: URL) async {
+        await ChatGPTProfileOperationCoordinator.shared.reactivate(
+            profileKey: chatGPTProfileCoordinationKey(codexHomeURL)
+        )
+    }
+
+    private func logoutWithoutCoordination() async throws {
+        try await withInitializedSession { session in
+            let _: ChatGPTEmptyResponse = try await session.request(method: "account/logout")
+        }
+    }
+
+    private func withProfileAccess<Result: Sendable>(
+        _ operation: () async throws -> Result
+    ) async throws -> Result {
+        let lease = try await acquireProfileLease()
+        do {
             let result = try await operation()
-            await ChatGPTAuthenticationOperationRegistry.shared.release(lease)
+            await ChatGPTProfileOperationCoordinator.shared.release(lease)
             return result
         } catch {
-            await ChatGPTAuthenticationOperationRegistry.shared.release(lease)
+            await ChatGPTProfileOperationCoordinator.shared.release(lease)
+            throw error
+        }
+    }
+
+    private func acquireProfileLease() async throws -> ChatGPTProfileOperationLease {
+        let lease = await ChatGPTProfileOperationCoordinator.shared.acquire(
+            profileKey: profileKey
+        )
+        guard let lease else {
+            try Task.checkCancellation()
+            throw ChatGPTConnectorError.profileRetired
+        }
+        do {
+            try Task.checkCancellation()
+            return lease
+        } catch {
+            await ChatGPTProfileOperationCoordinator.shared.release(lease)
             throw error
         }
     }
@@ -272,24 +474,24 @@ public actor ChatGPTManagedLoginSession {
     private var completedResult: ChatGPTLoginCompletionDTO?
     private var wasCancelled = false
     private var isWaiting = false
-    private var authenticationLease: ChatGPTAuthenticationOperationLease?
+    private var profileLease: ChatGPTProfileOperationLease?
 
     fileprivate init(
         flow: ChatGPTLoginFlowDTO,
         session: ChatGPTAppServerRPCSession,
         defaultTimeoutSeconds: TimeInterval,
-        authenticationLease: ChatGPTAuthenticationOperationLease
+        profileLease: ChatGPTProfileOperationLease
     ) {
         self.flow = flow
         self.session = session
         self.defaultTimeoutSeconds = defaultTimeoutSeconds
-        self.authenticationLease = authenticationLease
+        self.profileLease = profileLease
     }
 
     deinit {
-        if let authenticationLease {
+        if let profileLease {
             Task {
-                await ChatGPTAuthenticationOperationRegistry.shared.release(authenticationLease)
+                await ChatGPTProfileOperationCoordinator.shared.release(profileLease)
             }
         }
     }
@@ -328,14 +530,14 @@ public actor ChatGPTManagedLoginSession {
             }
             await session.close()
             self.session = nil
-            await releaseAuthenticationLease()
+            await releaseProfileLease()
             completedResult = completion
             isWaiting = false
             return completion
         } catch {
             await session.close()
             self.session = nil
-            await releaseAuthenticationLease()
+            await releaseProfileLease()
             isWaiting = false
             throw error
         }
@@ -350,7 +552,7 @@ public actor ChatGPTManagedLoginSession {
             // pending flow without introducing a second JSONL reader on the same connection.
             await session.close()
             self.session = nil
-            await releaseAuthenticationLease()
+            await releaseProfileLease()
             return
         }
         do {
@@ -360,44 +562,19 @@ public actor ChatGPTManagedLoginSession {
             )
             await session.close()
             self.session = nil
-            await releaseAuthenticationLease()
+            await releaseProfileLease()
         } catch {
             await session.close()
             self.session = nil
-            await releaseAuthenticationLease()
+            await releaseProfileLease()
             throw error
         }
     }
 
-    private func releaseAuthenticationLease() async {
-        guard let authenticationLease else { return }
-        self.authenticationLease = nil
-        await ChatGPTAuthenticationOperationRegistry.shared.release(authenticationLease)
-    }
-}
-
-fileprivate struct ChatGPTAuthenticationOperationLease: Equatable, Sendable {
-    let codexHomePath: String
-    let id: UUID
-}
-
-fileprivate actor ChatGPTAuthenticationOperationRegistry {
-    static let shared = ChatGPTAuthenticationOperationRegistry()
-
-    private var activeLeases: [String: UUID] = [:]
-
-    func acquire(codexHomePath: String) throws -> ChatGPTAuthenticationOperationLease {
-        guard activeLeases[codexHomePath] == nil else {
-            throw ChatGPTConnectorError.authenticationOperationInProgress
-        }
-        let lease = ChatGPTAuthenticationOperationLease(codexHomePath: codexHomePath, id: UUID())
-        activeLeases[codexHomePath] = lease.id
-        return lease
-    }
-
-    func release(_ lease: ChatGPTAuthenticationOperationLease) {
-        guard activeLeases[lease.codexHomePath] == lease.id else { return }
-        activeLeases.removeValue(forKey: lease.codexHomePath)
+    private func releaseProfileLease() async {
+        guard let profileLease else { return }
+        self.profileLease = nil
+        await ChatGPTProfileOperationCoordinator.shared.release(profileLease)
     }
 }
 
@@ -413,4 +590,45 @@ private func validatedThreadID(_ threadID: String?) throws -> String? {
         throw ChatGPTConnectorError.invalidProviderPayload
     }
     return normalized
+}
+
+func chatGPTProfileCoordinationKey(_ url: URL) -> String {
+    let canonicalURL = canonicalChatGPTProfileURL(url)
+    let path = canonicalURL.path.precomposedStringWithCanonicalMapping
+    return normalizedChatGPTProfileCoordinationPath(
+        path,
+        volumeSupportsCaseSensitiveNames: chatGPTVolumeSupportsCaseSensitiveNames(
+            for: canonicalURL
+        )
+    )
+}
+
+private func canonicalChatGPTProfileURL(_ url: URL) -> URL {
+    let standardizedURL = url.standardizedFileURL
+    let path = standardizedURL.path
+    for systemAlias in ["/var", "/tmp", "/etc"] {
+        if path == systemAlias || path.hasPrefix("\(systemAlias)/") {
+            return URL(fileURLWithPath: "/private\(path)", isDirectory: true)
+        }
+    }
+    return standardizedURL.resolvingSymlinksInPath().standardizedFileURL
+}
+
+func normalizedChatGPTProfileCoordinationPath(
+    _ path: String,
+    volumeSupportsCaseSensitiveNames: Bool?
+) -> String {
+    volumeSupportsCaseSensitiveNames == false ? path.lowercased() : path
+}
+
+private func chatGPTVolumeSupportsCaseSensitiveNames(for url: URL) -> Bool? {
+    var candidate = canonicalChatGPTProfileURL(url)
+    while !FileManager.default.fileExists(atPath: candidate.path) {
+        let parent = canonicalChatGPTProfileURL(candidate.deletingLastPathComponent())
+        guard parent.path != candidate.path else { return nil }
+        candidate = parent
+    }
+    return try? candidate
+        .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        .volumeSupportsCaseSensitiveNames
 }

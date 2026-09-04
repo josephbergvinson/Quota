@@ -4,18 +4,26 @@ public struct ProviderFetchResult: Sendable {
     public let snapshot: UsageSnapshot
     public let warnings: [String]
     public let providerAccountLabel: String?
+    /// A best-effort provider identity used transiently to prevent duplicate rotation.
+    /// It can contain personal data such as an email address and must not be logged or persisted.
+    public let providerIdentityKey: String?
     public let providerPlanLabel: String?
+    public let resolvedAccountKind: AccountKind?
 
     public init(
         snapshot: UsageSnapshot,
         warnings: [String] = [],
         providerAccountLabel: String? = nil,
-        providerPlanLabel: String? = nil
+        providerIdentityKey: String? = nil,
+        providerPlanLabel: String? = nil,
+        resolvedAccountKind: AccountKind? = nil
     ) {
         self.snapshot = snapshot
         self.warnings = warnings
         self.providerAccountLabel = providerAccountLabel
+        self.providerIdentityKey = providerIdentityKey
         self.providerPlanLabel = providerPlanLabel
+        self.resolvedAccountKind = resolvedAccountKind
     }
 }
 

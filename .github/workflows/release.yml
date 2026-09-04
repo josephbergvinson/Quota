@@ -123,7 +123,7 @@ jobs:
 
           This build is ad-hoc signed rather than Developer ID signed or notarized. On first launch, Control-click Quota in Finder, choose **Open**, then confirm **Open**. If macOS still blocks it, use **System Settings → Privacy & Security → Open Anyway**. Do not disable Gatekeeper. You can verify the ZIP against the attached `.sha256` file.
 
-          Connecting a ChatGPT Pro account requires a local Codex command supplied by the ChatGPT app, Codex app, or Codex CLI. ChatGPT data reflects provider-reported Codex usage, not every feature in ChatGPT. OpenAI API organization accounts instead require an organization-owner Admin API key and do not expose ChatGPT Pro quotas.
+          Connecting a ChatGPT Plus or Pro account requires a local Codex command supplied by the ChatGPT app, Codex app, or Codex CLI. Connecting a Claude Pro or Max account requires a current Anthropic-signed Claude Code installation. Subscription data reflects provider-reported usage surfaces, not every feature in ChatGPT or Claude. OpenAI and Anthropic API organization accounts instead use organization Admin API keys and do not expose consumer-subscription quotas.
 
           Quota keeps account history on your Mac and stores credentials in macOS Keychain.
           EOF

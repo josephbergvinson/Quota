@@ -6,8 +6,24 @@ public struct ChatGPTUsageProvider: UsageProvider {
     public let dataSourceKind: UsageDataSourceKind = .chatGPTAppServer
     public let accountsDirectoryURL: URL
 
+    private let connectorFactory: @Sendable (UUID) throws -> any ChatGPTAppServerConnecting
+
     public init(accountsDirectoryURL: URL) {
         self.accountsDirectoryURL = accountsDirectoryURL
+        self.connectorFactory = { accountID in
+            try Self.makeConnector(
+                accountsDirectoryURL: accountsDirectoryURL,
+                accountID: accountID
+            )
+        }
+    }
+
+    init(
+        accountsDirectoryURL: URL,
+        connectorFactory: @escaping @Sendable (UUID) throws -> any ChatGPTAppServerConnecting
+    ) {
+        self.accountsDirectoryURL = accountsDirectoryURL
+        self.connectorFactory = connectorFactory
     }
 
     public func fetchUsage(
@@ -15,21 +31,29 @@ public struct ChatGPTUsageProvider: UsageProvider {
         credential: ProviderCredential?,
         now: Date
     ) async throws -> ProviderFetchResult {
-        guard account.kind == .chatGPTPro else {
+        guard account.kind.isChatGPTSubscription else {
             throw ProviderError.unsupportedAccount
         }
 
-        let connector = try connector(for: account.id)
-        let telemetry = try await connector.readTelemetry(capturedAt: now)
+        let connector = try connectorFactory(account.id)
+        let telemetry = try await connector.readTelemetry(
+            refreshToken: false,
+            capturedAt: now
+        )
         guard
             let providerAccount = telemetry.account.account,
             case let .chatGPT(email, planType) = providerAccount
         else {
             throw ProviderError.invalidResponse
         }
+        let normalizedEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let resolvedAccountKind = resolvedAccountKind(from: planType) else {
+            throw ChatGPTConnectorError.unsupportedSubscriptionPlan
+        }
         let quotaWindows = try makeQuotaWindows(
             from: telemetry.rateLimits,
-            capturedAt: telemetry.capturedAt
+            capturedAt: telemetry.capturedAt,
+            accountKind: resolvedAccountKind
         )
         let bankedResetCredits = try makeBankedResetCredits(
             from: telemetry.rateLimits.resetCredits
@@ -125,18 +149,28 @@ public struct ChatGPTUsageProvider: UsageProvider {
                     )
                     : .available(dailyUsage)
             ),
-            providerAccountLabel: email,
-            providerPlanLabel: humanReadablePlan(planType)
+            providerAccountLabel: normalizedEmail.isEmpty ? nil : normalizedEmail,
+            providerIdentityKey: normalizedEmail.isEmpty
+                ? nil
+                : "email:\(normalizedEmail.lowercased())",
+            providerPlanLabel: humanReadablePlan(planType),
+            resolvedAccountKind: resolvedAccountKind
         )
     }
 
     public func connector(for accountID: UUID) throws -> ChatGPTAppServerConnector {
-        let homeURL = codexHomeURL(for: accountID)
-        try FileManager.default.createDirectory(
-            at: homeURL,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
+        try Self.makeConnector(
+            accountsDirectoryURL: accountsDirectoryURL,
+            accountID: accountID
         )
+    }
+
+    private static func makeConnector(
+        accountsDirectoryURL: URL,
+        accountID: UUID
+    ) throws -> ChatGPTAppServerConnector {
+        let homeURL = accountsDirectoryURL
+            .appendingPathComponent(accountID.uuidString.lowercased(), isDirectory: true)
         return try ChatGPTAppServerConnector(codexHomeURL: homeURL)
     }
 
@@ -147,7 +181,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
 
     func makeQuotaWindows(
         from limits: ChatGPTRateLimitsDTO,
-        capturedAt: Date
+        capturedAt: Date,
+        accountKind: AccountKind
     ) throws -> [QuotaWindow] {
         let buckets: [(String, ChatGPTRateLimitSnapshotDTO)]
         if let byID = limits.rateLimitsByLimitID, !byID.isEmpty {
@@ -166,7 +201,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
                    primary,
                    dictionaryID: dictionaryID,
                    limitID: limitID,
-                   limitName: limitName
+                   limitName: limitName,
+                   accountKind: accountKind
                ),
                !isClearlyUninitialized(primary, capturedAt: capturedAt) {
                 windows.append(
@@ -183,7 +219,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
                    secondary,
                    dictionaryID: dictionaryID,
                    limitID: limitID,
-                   limitName: limitName
+                   limitName: limitName,
+                   accountKind: accountKind
                ),
                !isClearlyUninitialized(secondary, capturedAt: capturedAt) {
                 windows.append(
@@ -232,16 +269,13 @@ public struct ChatGPTUsageProvider: UsageProvider {
         _ value: ChatGPTRateLimitWindowDTO,
         dictionaryID: String,
         limitID: String,
-        limitName: String
+        limitName: String,
+        accountKind: AccountKind
     ) -> Bool {
         ChatGPTQuotaWindowPolicy.isSupportedWindow(
-            identifier: dictionaryID,
-            name: limitName,
-            durationMinutes: value.windowDurationMinutes
-        ) || ChatGPTQuotaWindowPolicy.isSupportedWindow(
-            identifier: limitID,
-            name: limitName,
-            durationMinutes: value.windowDurationMinutes
+            identityValues: [dictionaryID, limitID, limitName],
+            durationMinutes: value.windowDurationMinutes,
+            accountKind: accountKind
         )
     }
 
@@ -304,6 +338,20 @@ public struct ChatGPTUsageProvider: UsageProvider {
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .localizedCapitalized
+    }
+
+    func resolvedAccountKind(from planType: String) -> AccountKind? {
+        let words = planType
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+        if words.contains("plus") {
+            return .chatGPTPlus
+        }
+        if words.contains("pro") {
+            return .chatGPTPro
+        }
+        return nil
     }
 
     private func bankedResetStatus(_ status: String) -> BankedResetCreditStatus {

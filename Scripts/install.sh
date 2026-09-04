@@ -78,10 +78,20 @@ if [[ "${codex_available}" == false ]] && command -v codex >/dev/null 2>&1; then
     codex_available=true
 fi
 
+claude_available=false
+if [[ -d "/Applications/Claude.app" ]] || command -v claude >/dev/null 2>&1; then
+    claude_available=true
+fi
+
 print "Installing Quota with ${xcode_version%%$'\n'*} (Swift ${swift_version})..."
 if [[ "${codex_available}" == false ]]; then
-    print -u2 "Note: ChatGPT Pro connections require the ChatGPT app, Codex app, or Codex CLI."
-    print -u2 "      Quota can still be used with an OpenAI organization Admin API key."
+    print -u2 "Note: ChatGPT Plus and Pro connections require the ChatGPT app, Codex app, or Codex CLI."
+fi
+if [[ "${claude_available}" == false ]]; then
+    print -u2 "Note: Claude Pro and Max connections require Claude Desktop or a current Claude Code install."
+fi
+if [[ "${codex_available}" == false && "${claude_available}" == false ]]; then
+    print -u2 "      Quota can still be used with an OpenAI or Anthropic organization Admin API key."
 fi
 
 "${script_directory}/build-app.sh" release --open

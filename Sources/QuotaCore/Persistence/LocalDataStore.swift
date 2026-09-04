@@ -40,7 +40,7 @@ public actor LocalDataStore {
         }
 
         let storedData = try Data(contentsOf: stateFileURL)
-        let migration = try Self.removingLegacyProviderRecords(from: storedData)
+        let migration = try Self.migratingStateIfNeeded(from: storedData)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
@@ -78,68 +78,66 @@ public actor LocalDataStore {
         return applicationSupport.appendingPathComponent("Quota", isDirectory: true)
     }
 
-    private static func removingLegacyProviderRecords(from data: Data) throws -> LegacyMigrationResult {
+    private static func migratingStateIfNeeded(from data: Data) throws -> StateMigrationResult {
         guard
             var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            root["schemaVersion"] as? Int == PersistentState.currentSchemaVersion,
-            let accounts = root["accounts"] as? [[String: Any]],
-            let snapshots = root["snapshots"] as? [[String: Any]]
+            let schemaVersion = root["schemaVersion"] as? Int
         else {
-            return LegacyMigrationResult(data: data, didMigrate: false)
+            return StateMigrationResult(data: data, didMigrate: false)
         }
 
-        let legacyAccountKinds: Set<String> = ["claudeMax", "anthropicAPI"]
-        let legacySnapshotSources: Set<String> = ["anthropicAdminAPI"]
-        var legacyAccountIdentifiers = Set<String>()
-        var didMigrate = false
+        guard schemaVersion <= PersistentState.currentSchemaVersion else {
+            throw LocalDataStoreError.unsupportedSchema(
+                found: schemaVersion,
+                supported: PersistentState.currentSchemaVersion
+            )
+        }
+        guard schemaVersion < PersistentState.currentSchemaVersion else {
+            return StateMigrationResult(data: data, didMigrate: false)
+        }
 
-        let retainedAccounts = accounts.filter { account in
-            guard
-                let kind = account["kind"] as? String,
-                legacyAccountKinds.contains(kind)
-            else {
-                return true
+        // Schema 1 labeled every ChatGPT subscription `chatGPTPro` and called its single Claude
+        // choice `claudeMax`, even though neither old label established the actual tier. Preserve
+        // that uncertainty until the provider reports an authoritative plan. Retired Anthropic API
+        // records are intentionally retained because schema 2 restores that provider.
+        guard schemaVersion == 1, var accounts = root["accounts"] as? [[String: Any]] else {
+            return StateMigrationResult(data: data, didMigrate: false)
+        }
+        for index in accounts.indices {
+            switch accounts[index]["kind"] as? String {
+            case "chatGPTPro":
+                accounts[index]["kind"] = "chatGPTSubscription"
+            case "claudeMax":
+                accounts[index]["kind"] = "claudeSubscription"
+            default:
+                break
             }
-
-            didMigrate = true
-            if let identifier = account["id"] as? String {
-                legacyAccountIdentifiers.insert(identifier.lowercased())
+        }
+        root["accounts"] = accounts
+        if let snapshots = root["snapshots"] as? [[String: Any]] {
+            var accountKindsByIdentifier: [String: String] = [:]
+            for account in accounts {
+                guard
+                    let identifier = account["id"] as? String,
+                    let kind = account["kind"] as? String
+                else {
+                    continue
+                }
+                accountKindsByIdentifier[identifier.lowercased()] = kind
             }
-            return false
-        }
-
-        let retainedAccountIdentifiers = Set(
-            retainedAccounts.compactMap { ($0["id"] as? String)?.lowercased() }
-        )
-        guard legacyAccountIdentifiers.isDisjoint(with: retainedAccountIdentifiers) else {
-            throw LocalDataStoreError.duplicateAccountIdentifier
-        }
-
-        let retainedSnapshots = snapshots.filter { snapshot in
-            if
-                let source = snapshot["source"] as? String,
-                legacySnapshotSources.contains(source)
-            {
-                didMigrate = true
-                return false
+            root["snapshots"] = snapshots.filter { snapshot in
+                guard
+                    let identifier = (snapshot["accountID"] as? String)?.lowercased(),
+                    let kind = accountKindsByIdentifier[identifier],
+                    let source = snapshot["source"] as? String
+                else {
+                    return true
+                }
+                return Self.isCompatible(snapshotSource: source, accountKind: kind)
             }
-            if
-                let accountIdentifier = snapshot["accountID"] as? String,
-                legacyAccountIdentifiers.contains(accountIdentifier.lowercased())
-            {
-                didMigrate = true
-                return false
-            }
-            return true
         }
-
-        guard didMigrate else {
-            return LegacyMigrationResult(data: data, didMigrate: false)
-        }
-
-        root["accounts"] = retainedAccounts
-        root["snapshots"] = retainedSnapshots
-        return LegacyMigrationResult(
+        root["schemaVersion"] = PersistentState.currentSchemaVersion
+        return StateMigrationResult(
             data: try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]),
             didMigrate: true
         )
@@ -166,13 +164,18 @@ public actor LocalDataStore {
             throw LocalDataStoreError.duplicateAccountIdentifier
         }
 
-        let accountIdentifiers = Set(validatedAccounts.map(\.id))
+        let accountsByIdentifier = Dictionary(
+            uniqueKeysWithValues: validatedAccounts.map { ($0.id, $0) }
+        )
         guard Set(state.snapshots.map(\.id)).count == state.snapshots.count else {
             throw LocalDataStoreError.invalidSnapshot
         }
         for snapshot in state.snapshots {
-            guard accountIdentifiers.contains(snapshot.accountID) else {
+            guard let account = accountsByIdentifier[snapshot.accountID] else {
                 throw LocalDataStoreError.orphanedSnapshot
+            }
+            guard snapshot.source.isCompatible(with: account.kind) else {
+                throw LocalDataStoreError.invalidSnapshot
             }
             guard
                 snapshot.capturedAt.timeIntervalSinceReferenceDate.isFinite,
@@ -204,7 +207,7 @@ public actor LocalDataStore {
                         && usage.inputTokens >= 0
                         && usage.cachedInputTokens >= 0
                         && usage.outputTokens >= 0
-                        && usage.requests >= 0
+                        && (usage.requests.map { $0 >= 0 } ?? true)
                         && hasNonoverflowingSum([usage.inputTokens, usage.outputTokens])
                 }) else {
                     throw LocalDataStoreError.invalidSnapshot
@@ -217,7 +220,7 @@ public actor LocalDataStore {
                         && point.cachedInputTokens >= 0
                         && point.outputTokens >= 0
                         && point.unattributedTokens >= 0
-                        && point.requests >= 0
+                        && (point.requests.map { $0 >= 0 } ?? true)
                         && point.costUSD.isFinite
                         && point.costUSD >= 0
                         && hasNonoverflowingSum([
@@ -236,6 +239,23 @@ public actor LocalDataStore {
         metric.value.map { $0 >= 0 } ?? true
     }
 
+    private static func isCompatible(snapshotSource: String, accountKind: String) -> Bool {
+        switch snapshotSource {
+        case "manual":
+            true
+        case "chatGPTAppServer":
+            ["chatGPTPlus", "chatGPTPro", "chatGPTSubscription"].contains(accountKind)
+        case "claudeCodeOAuth":
+            ["claudePro", "claudeMax", "claudeSubscription"].contains(accountKind)
+        case "openAIAdminAPI":
+            accountKind == "openAIAPI"
+        case "anthropicAdminAPI":
+            accountKind == "anthropicAPI"
+        default:
+            true
+        }
+    }
+
     private func hasNonoverflowingSum(_ values: [Int]) -> Bool {
         var total = 0
         for value in values {
@@ -248,7 +268,7 @@ public actor LocalDataStore {
     }
 }
 
-private struct LegacyMigrationResult {
+private struct StateMigrationResult {
     let data: Data
     let didMigrate: Bool
 }

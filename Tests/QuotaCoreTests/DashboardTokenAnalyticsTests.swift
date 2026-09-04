@@ -51,6 +51,60 @@ final class DashboardTokenAnalyticsTests: XCTestCase {
         XCTAssertEqual(result.dailyPoints[0].totalTokens, 170)
     }
 
+    func testTokenTotalsCombineOpenAIAndAnthropicReportedUsage() throws {
+        let now = utcDate(year: 2026, month: 9, day: 2, hour: 12)
+        let openAIAccount = try makeAccount(name: "OpenAI API", kind: .openAIAPI)
+        let anthropicAccount = try makeAccount(name: "Anthropic API", kind: .anthropicAPI)
+        let day = utcDate(year: 2026, month: 9, day: 1)
+        let openAISnapshot = makeSnapshot(
+            accountID: openAIAccount.id,
+            capturedAt: now,
+            inputMetric: .available(10),
+            cachedMetric: .available(2),
+            outputMetric: .available(3),
+            points: [
+                DailyUsagePoint(
+                    date: day,
+                    inputTokens: 10,
+                    cachedInputTokens: 2,
+                    outputTokens: 3
+                )
+            ],
+            source: .openAIAdminAPI
+        )
+        let anthropicSnapshot = makeSnapshot(
+            accountID: anthropicAccount.id,
+            capturedAt: now,
+            inputMetric: .available(20),
+            cachedMetric: .available(4),
+            outputMetric: .available(5),
+            points: [
+                DailyUsagePoint(
+                    date: day,
+                    inputTokens: 20,
+                    cachedInputTokens: 4,
+                    outputTokens: 5
+                )
+            ],
+            source: .anthropicAdminAPI
+        )
+
+        let result = UsageAnalytics.tokenBreakdown(
+            accounts: [openAIAccount, anthropicAccount],
+            snapshots: [openAISnapshot, anthropicSnapshot],
+            now: now,
+            dayCount: 7
+        )
+
+        XCTAssertEqual(result.totalTokens, 38)
+        XCTAssertEqual(result.uncachedInputTokens, 24)
+        XCTAssertEqual(result.cachedInputTokens, 6)
+        XCTAssertEqual(result.outputTokens, 8)
+        XCTAssertEqual(result.accountsReportingDailyUsage, 2)
+        XCTAssertEqual(result.accountsReportingTokenSplit, 2)
+        XCTAssertEqual(result.dailyPoints.map(\.totalTokens), [38])
+    }
+
     func testRangeIncludesLastSevenUTCDaysAndUsesExclusiveEnd() throws {
         let now = utcDate(year: 2026, month: 9, day: 2, hour: 12)
         let account = try makeAccount(kind: .openAIAPI)
@@ -291,6 +345,70 @@ final class DashboardTokenAnalyticsTests: XCTestCase {
         }
     }
 
+    func testCostProviderQualificationExcludesAwaitingAnthropicAccount() throws {
+        let now = utcDate(year: 2026, month: 9, day: 2, hour: 12)
+        let openAIAccount = try makeAccount(name: "OpenAI API", kind: .openAIAPI)
+        let anthropicAccount = try makeAccount(name: "Anthropic API", kind: .anthropicAPI)
+        let unavailable = UnavailableMetric(
+            reason: .notExposedByProvider,
+            detail: "Unavailable"
+        )
+        let openAISnapshot = UsageSnapshot(
+            accountID: openAIAccount.id,
+            capturedAt: now,
+            source: .openAIAdminAPI,
+            reportingPeriod: nil,
+            allowance: .unavailable(unavailable),
+            quotaWindows: .unavailable(unavailable),
+            resetAt: .unavailable(unavailable),
+            totalTokens: .available(10),
+            inputTokens: .available(8),
+            cachedInputTokens: .available(0),
+            outputTokens: .available(2),
+            requests: .available(1),
+            costUSD: .available(0.25),
+            modelUsage: .available([]),
+            dailyUsage: .available([
+                DailyUsagePoint(
+                    date: now,
+                    inputTokens: 8,
+                    outputTokens: 2,
+                    requests: 1,
+                    costUSD: 0.25
+                )
+            ])
+        )
+        let anthropicSnapshot = UsageSnapshot.awaitingRefresh(
+            accountID: anthropicAccount.id,
+            source: .anthropicAdminAPI,
+            at: now
+        )
+
+        let result = UsageAnalytics.tokenBreakdown(
+            accounts: [openAIAccount, anthropicAccount],
+            snapshots: [openAISnapshot, anthropicSnapshot],
+            now: now,
+            dayCount: 7
+        )
+
+        XCTAssertEqual(result.accountsReportingCost, 1)
+        XCTAssertEqual(result.costContributingProviders, [.openAI])
+        XCTAssertFalse(result.costContributingProviders.contains(.anthropic))
+    }
+
+    func testCumulativeUsagePreservesUnavailableRequestCounts() {
+        let firstDay = utcDate(year: 2026, month: 9, day: 1)
+        let secondDay = utcDate(year: 2026, month: 9, day: 2)
+
+        let result = UsageAnalytics.cumulativeUsage([
+            DailyUsagePoint(date: firstDay, inputTokens: 2, requests: nil),
+            DailyUsagePoint(date: secondDay, inputTokens: 3, requests: 1)
+        ])
+
+        XCTAssertEqual(result.map(\.inputTokens), [2, 5])
+        XCTAssertEqual(result.map(\.requests), [nil, nil])
+    }
+
     func testCumulativeUsageSortsAndAccumulatesEveryMetric() {
         let firstDay = utcDate(year: 2026, month: 9, day: 1)
         let secondDay = utcDate(year: 2026, month: 9, day: 2)
@@ -320,7 +438,7 @@ final class DashboardTokenAnalyticsTests: XCTestCase {
         XCTAssertEqual(result.map(\.cachedInputTokens), [2, 3])
         XCTAssertEqual(result.map(\.outputTokens), [3, 10])
         XCTAssertEqual(result.map(\.unattributedTokens), [4, 10])
-        XCTAssertEqual(result.map(\.requests), [1, 3])
+        XCTAssertEqual(result.map(\.requests), [1, 3] as [Int?])
         XCTAssertEqual(result.map(\.costUSD), [0.5, 1.75])
         XCTAssertEqual(result.map(\.totalTokens), [17, 35])
     }
@@ -355,12 +473,13 @@ final class DashboardTokenAnalyticsTests: XCTestCase {
         inputMetric: Metric<Int>,
         cachedMetric: Metric<Int>,
         outputMetric: Metric<Int>,
-        points: [DailyUsagePoint]
+        points: [DailyUsagePoint],
+        source: UsageSource = .openAIAdminAPI
     ) -> UsageSnapshot {
         UsageSnapshot(
             accountID: accountID,
             capturedAt: capturedAt,
-            source: .openAIAdminAPI,
+            source: source,
             reportingPeriod: nil,
             allowance: .unavailable(UnavailableMetric(reason: .notExposedByProvider, detail: "Unavailable")),
             quotaWindows: .unavailable(UnavailableMetric(reason: .notExposedByProvider, detail: "Unavailable")),

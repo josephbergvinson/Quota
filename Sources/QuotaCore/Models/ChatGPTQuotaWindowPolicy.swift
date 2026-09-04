@@ -1,11 +1,10 @@
 import Foundation
 
 /// Product policy for rate-limit buckets that Codex reports but Quota does not use for
-/// regular account rotation. ChatGPT's Codex service currently returns several model and
-/// duration buckets, but Quota's planner is intentionally scoped to the regular Codex
-/// one-week allowance. Keep the match tolerant of provider punctuation/casing changes while
-/// requiring the known Codex identity and weekly duration.
+/// regular account rotation. Keep the match tolerant of provider punctuation/casing changes,
+/// require the known Codex identity, and apply the subscription tier's supported durations.
 enum ChatGPTQuotaWindowPolicy {
+    static let codexFiveHourDurationMinutes = 300
     static let codexWeeklyDurationMinutes = 10_080
 
     private static let sparkModelMarker = "gpt53codexspark"
@@ -13,30 +12,44 @@ enum ChatGPTQuotaWindowPolicy {
     private static let codexIdentifier = "codex"
 
     static func isSupportedWindow(
-        identifier: String?,
-        name: String?,
-        durationMinutes: Int64?
+        identityValues: [String?],
+        durationMinutes: Int64?,
+        accountKind: AccountKind
     ) -> Bool {
-        guard durationMinutes == Int64(codexWeeklyDurationMinutes) else {
-            return false
-        }
-
-        let normalizedValues = [identifier, name]
+        let normalizedValues = identityValues
             .compactMap { $0 }
             .map(normalized)
         guard !normalizedValues.contains(where: isSparkValue) else { return false }
+        guard normalizedValues.contains(where: { value in
+            value == codexIdentifier
+                || value == "\(codexIdentifier)primary"
+                || value == "\(codexIdentifier)secondary"
+                || value.hasPrefix("\(codexIdentifier)5hour")
+                || value.hasPrefix("\(codexIdentifier)1week")
+        }) else {
+            return false
+        }
 
-        return normalizedValues.contains { value in
-            value == codexIdentifier || value.hasPrefix("\(codexIdentifier)1week")
+        switch accountKind {
+        case .chatGPTPlus:
+            return durationMinutes == Int64(codexFiveHourDurationMinutes)
+                || durationMinutes == Int64(codexWeeklyDurationMinutes)
+        case .chatGPTPro, .chatGPTSubscription:
+            return durationMinutes == Int64(codexWeeklyDurationMinutes)
+        case .openAIAPI, .claudePro, .claudeMax, .claudeSubscription, .anthropicAPI:
+            return false
         }
     }
 
-    static func isSupportedWindow(_ window: QuotaWindow) -> Bool {
+    static func isSupportedWindow(
+        _ window: QuotaWindow,
+        accountKind: AccountKind
+    ) -> Bool {
         guard let durationMinutes = window.durationMinutes else { return false }
         return isSupportedWindow(
-            identifier: window.identifier,
-            name: window.name,
-            durationMinutes: Int64(durationMinutes)
+            identityValues: [window.identifier, window.name],
+            durationMinutes: Int64(durationMinutes),
+            accountKind: accountKind
         )
     }
 

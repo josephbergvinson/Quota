@@ -9,14 +9,21 @@ public struct UsageProviderRegistry: Sendable {
 
     public init(
         httpClient: any HTTPClient = URLSessionHTTPClient(),
-        chatGPTAccountsDirectoryURL: URL? = nil
+        chatGPTAccountsDirectoryURL: URL? = nil,
+        claudeCodeAccountsDirectoryURL: URL? = nil
     ) {
         var providers: [any UsageProvider] = [
-            OpenAIUsageProvider(httpClient: httpClient)
+            OpenAIUsageProvider(httpClient: httpClient),
+            AnthropicUsageProvider(httpClient: httpClient)
         ]
         if let chatGPTAccountsDirectoryURL {
             providers.append(
                 ChatGPTUsageProvider(accountsDirectoryURL: chatGPTAccountsDirectoryURL)
+            )
+        }
+        if let claudeCodeAccountsDirectoryURL {
+            providers.append(
+                ClaudeCodeUsageProvider(accountsDirectoryURL: claudeCodeAccountsDirectoryURL)
             )
         }
         self.init(providers: providers)
@@ -43,7 +50,11 @@ public actor UsageRefreshService {
         guard let provider = registry.provider(for: account) else {
             throw ProviderError.unsupportedAccount
         }
-        let credential = try credentialStore.credential(for: account.id)
+        let credential: ProviderCredential? = if account.kind.requiresCredential {
+            try credentialStore.credential(for: account.id)
+        } else {
+            nil
+        }
         return try await provider.fetchUsage(for: account, credential: credential, now: now)
     }
 }

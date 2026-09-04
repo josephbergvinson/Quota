@@ -1,7 +1,8 @@
 import Foundation
 
-public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable {
+public enum ProviderKind: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
     case openAI
+    case anthropic
 
     public var id: String { rawValue }
 
@@ -9,6 +10,8 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
         switch self {
         case .openAI:
             "OpenAI"
+        case .anthropic:
+            "Anthropic"
         }
     }
 }
@@ -16,56 +19,121 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
 public enum UsageDataSourceKind: String, Codable, Sendable {
     case manual
     case chatGPTAppServer
+    case claudeCodeOAuth
     case openAIAdminAPI
+    case anthropicAdminAPI
 }
 
 public enum AccountKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case chatGPTPlus
     case chatGPTPro
+    /// Migrated from the old account type, which labeled every ChatGPT subscription "Pro".
+    case chatGPTSubscription
+    case claudePro
+    case claudeMax
+    /// Migrated from the old ambiguous "Claude Pro / Max" account type.
+    case claudeSubscription
     case openAIAPI
+    case anthropicAPI
+
+    public static let allCases: [AccountKind] = [
+        .chatGPTPlus,
+        .chatGPTPro,
+        .openAIAPI,
+        .claudePro,
+        .claudeMax,
+        .anthropicAPI
+    ]
 
     public var id: String { rawValue }
 
     public var provider: ProviderKind {
         switch self {
-        case .chatGPTPro, .openAIAPI:
+        case .chatGPTPlus, .chatGPTPro, .chatGPTSubscription, .openAIAPI:
             .openAI
+        case .claudePro, .claudeMax, .claudeSubscription, .anthropicAPI:
+            .anthropic
         }
     }
 
     public var dataSource: UsageDataSourceKind {
         switch self {
-        case .chatGPTPro:
+        case .chatGPTPlus, .chatGPTPro, .chatGPTSubscription:
             .chatGPTAppServer
+        case .claudePro, .claudeMax, .claudeSubscription:
+            .claudeCodeOAuth
         case .openAIAPI:
             .openAIAdminAPI
+        case .anthropicAPI:
+            .anthropicAdminAPI
         }
     }
 
     public var displayName: String {
         switch self {
+        case .chatGPTPlus:
+            "ChatGPT Plus"
         case .chatGPTPro:
             "ChatGPT Pro"
+        case .chatGPTSubscription:
+            "ChatGPT subscription"
+        case .claudePro:
+            "Claude Pro"
+        case .claudeMax:
+            "Claude Max"
+        case .claudeSubscription:
+            "Claude subscription"
         case .openAIAPI:
             "OpenAI API organization"
+        case .anthropicAPI:
+            "Anthropic API organization"
         }
     }
 
     public var shortName: String {
         switch self {
+        case .chatGPTPlus:
+            "ChatGPT Plus"
         case .chatGPTPro:
             "ChatGPT Pro"
+        case .chatGPTSubscription:
+            "ChatGPT subscription"
+        case .claudePro:
+            "Claude Pro"
+        case .claudeMax:
+            "Claude Max"
+        case .claudeSubscription:
+            "Claude subscription"
         case .openAIAPI:
             "OpenAI API"
+        case .anthropicAPI:
+            "Anthropic API"
         }
     }
 
     public var requiresCredential: Bool {
         switch dataSource {
-        case .openAIAdminAPI:
+        case .openAIAdminAPI, .anthropicAdminAPI:
             true
-        case .manual, .chatGPTAppServer:
+        case .manual, .chatGPTAppServer, .claudeCodeOAuth:
             false
         }
+    }
+
+    public var isChatGPTSubscription: Bool {
+        dataSource == .chatGPTAppServer
+    }
+
+    public var isClaudeSubscription: Bool {
+        dataSource == .claudeCodeOAuth
+    }
+
+    public var isManagedSubscription: Bool {
+        isChatGPTSubscription || isClaudeSubscription
+    }
+
+    public var isAPIOrganization: Bool {
+        dataSource == .openAIAdminAPI || dataSource == .anthropicAdminAPI
     }
 }
 

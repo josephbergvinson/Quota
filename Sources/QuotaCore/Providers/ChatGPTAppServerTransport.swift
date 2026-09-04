@@ -15,9 +15,11 @@ public enum ChatGPTConnectorError: LocalizedError, Equatable, Sendable {
     case rpcFailure(code: Int)
     case invalidProviderPayload
     case unsupportedAuthenticationMode(String)
+    case unsupportedSubscriptionPlan
     case notAuthenticated
     case authenticationOperationInProgress
     case loginFinished
+    case profileRetired
 
     public var errorDescription: String? {
         switch self {
@@ -49,12 +51,16 @@ public enum ChatGPTConnectorError: LocalizedError, Equatable, Sendable {
             "The local Codex service returned invalid account data."
         case let .unsupportedAuthenticationMode(mode):
             "This Codex authentication mode is not supported by Quota (\(mode))."
+        case .unsupportedSubscriptionPlan:
+            "Quota currently supports ChatGPT Plus and Pro subscriptions, not Business, Team, or Enterprise plans."
         case .notAuthenticated:
             "This account is not signed in to ChatGPT."
         case .authenticationOperationInProgress:
             "Another ChatGPT sign-in or credential refresh is already in progress for this account."
         case .loginFinished:
             "This ChatGPT sign-in attempt has already finished."
+        case .profileRetired:
+            "This ChatGPT account is being removed."
         }
     }
 }

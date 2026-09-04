@@ -42,17 +42,19 @@ struct AccountEditorView: View {
         VStack(spacing: 0) {
             Form {
                 Section("Account") {
-                    Picker("Type", selection: $accountKind) {
-                        ForEach(AccountKind.allCases) { kind in
-                            Text(kind.displayName).tag(kind)
+                    if let existing = mode.existingAccount {
+                        LabeledContent("Type", value: existing.kind.displayName)
+                    } else {
+                        Picker("Type", selection: $accountKind) {
+                            ForEach(AccountKind.allCases) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
                         }
-                    }
-                    .disabled(mode.existingAccount != nil)
-                    .onChange(of: accountKind) { _, newValue in
-                        guard mode.existingAccount == nil else { return }
-                        displayName = newValue.displayName
-                        organizationIdentifier = ""
-                        credential = ""
+                        .onChange(of: accountKind) { _, newValue in
+                            displayName = newValue.displayName
+                            organizationIdentifier = ""
+                            credential = ""
+                        }
                     }
 
                     TextField("Name", text: $displayName)
@@ -87,7 +89,7 @@ struct AccountEditorView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
-                } else if accountKind == .chatGPTPro {
+                } else if accountKind.isChatGPTSubscription {
                     Section("Connection") {
                         Label {
                             Text("Quota opens OpenAI's managed ChatGPT sign-in through the local Codex service. Codex keeps each account's tokens in macOS Keychain.")
@@ -97,6 +99,19 @@ struct AccountEditorView: View {
                         .font(.callout)
 
                         Text("After adding the account, finish sign-in in your browser. Quota reads only the supported Codex quota windows and aggregate token history; other ChatGPT product limits stay unavailable.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if accountKind.isClaudeSubscription {
+                    Section("Connection") {
+                        Label {
+                            Text("Quota asks Anthropic's installed Claude Code client to open its secure sign-in page. Claude Code keeps this account's managed session isolated in its own local profile.")
+                        } icon: {
+                            Image(systemName: "person.badge.key")
+                        }
+                        .font(.callout)
+
+                        Text("After adding the account, finish sign-in in your browser. Quota reads only the usage windows and reset times Claude Code reports; token history and other missing metrics stay hidden.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -139,19 +154,23 @@ struct AccountEditorView: View {
         switch accountKind {
         case .openAIAPI:
             "Use an OpenAI organization Admin API key. Normal project API keys cannot access organization usage."
-        case .chatGPTPro:
+        case .anthropicAPI:
+            "Use an Anthropic Admin API key (sk-ant-admin…) for a Claude Console organization. Workspace keys cannot access organization usage reports."
+        case .chatGPTPlus, .chatGPTPro, .chatGPTSubscription,
+             .claudePro, .claudeMax, .claudeSubscription:
             "Use a supported provider credential."
         }
     }
 
     private var primaryButtonTitle: String {
         guard mode.existingAccount == nil else { return "Save" }
-        switch accountKind {
-        case .chatGPTPro:
+        if accountKind.isChatGPTSubscription {
             return "Connect ChatGPT"
-        case .openAIAPI:
-            return "Add Account"
         }
+        if accountKind.isClaudeSubscription {
+            return "Connect Claude"
+        }
+        return "Add Account"
     }
 
     private func save() {

@@ -71,6 +71,59 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(actual, expected)
     }
 
+    func testLocalDataRoundTripPreservesUnavailableNestedRequestCounts() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = try LocalDataStore(directoryURL: temporaryDirectory)
+        let account = try makeAccount(kind: .anthropicAPI)
+        let unavailable = UnavailableMetric(
+            reason: .notExposedByProvider,
+            detail: "Anthropic does not report request counts."
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            capturedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            source: .anthropicAdminAPI,
+            reportingPeriod: nil,
+            allowance: .unavailable(unavailable),
+            quotaWindows: .unavailable(unavailable),
+            resetAt: .unavailable(unavailable),
+            totalTokens: .available(12),
+            inputTokens: .available(10),
+            cachedInputTokens: .available(2),
+            outputTokens: .available(2),
+            requests: .unavailable(unavailable),
+            costUSD: .available(0.1),
+            modelUsage: .available([
+                ModelUsage(
+                    model: "claude-sonnet-5",
+                    inputTokens: 10,
+                    cachedInputTokens: 2,
+                    outputTokens: 2,
+                    requests: nil
+                )
+            ]),
+            dailyUsage: .available([
+                DailyUsagePoint(
+                    date: Date(timeIntervalSince1970: 1_799_971_200),
+                    inputTokens: 10,
+                    cachedInputTokens: 2,
+                    outputTokens: 2,
+                    requests: nil,
+                    costUSD: 0.1
+                )
+            ])
+        )
+
+        try await store.save(PersistentState(accounts: [account], snapshots: [snapshot]))
+        let loaded = try await store.load()
+
+        XCTAssertNil(loaded.snapshots.first?.modelUsage.value?.first?.requests)
+        XCTAssertNil(loaded.snapshots.first?.dailyUsage.value?.first?.requests)
+    }
+
     func testLegacySnapshotWithoutBankedResetFieldLoadsAsUnavailable() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -134,6 +187,26 @@ final class PersistenceTests: XCTestCase {
         }
     }
 
+    func testLocalDataRejectsHistoryFromAnotherProviderConnection() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let store = try LocalDataStore(directoryURL: temporaryDirectory)
+        let account = try makeAccount(kind: .openAIAPI)
+        let snapshot = UsageSnapshot.awaitingRefresh(
+            accountID: account.id,
+            source: .anthropicAdminAPI,
+            at: Date()
+        )
+
+        do {
+            try await store.save(PersistentState(accounts: [account], snapshots: [snapshot]))
+            XCTFail("Expected cross-provider history to be rejected")
+        } catch let error as LocalDataStoreError {
+            XCTAssertEqual(error, .invalidSnapshot)
+        }
+    }
+
     func testAllowanceRejectsInvalidBoundaryValues() {
         XCTAssertThrowsError(try Allowance(used: -1, limit: 100, unit: .percent))
         XCTAssertThrowsError(try Allowance(used: 1, limit: 0, unit: .percent))
@@ -176,7 +249,7 @@ final class PersistenceTests: XCTestCase {
         }
     }
 
-    func testLoadMigratesLegacyProviderRecordsAndKeepsOpenAIHistory() async throws {
+    func testSchemaOneMigrationPreservesProvidersAndKeepsSubscriptionPlansAmbiguous() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
@@ -198,17 +271,23 @@ final class PersistenceTests: XCTestCase {
         )
         let savedAccounts = try XCTUnwrap(root["accounts"] as? [[String: Any]])
         let savedSnapshots = try XCTUnwrap(root["snapshots"] as? [[String: Any]])
+        let legacyChatGPTID = UUID().uuidString
         let legacySubscriptionID = UUID().uuidString
         let legacyAPIID = UUID().uuidString
 
+        var legacyChatGPT = try XCTUnwrap(savedAccounts.first)
+        legacyChatGPT["id"] = legacyChatGPTID
+        legacyChatGPT["displayName"] = "Legacy ChatGPT subscription"
+        legacyChatGPT["kind"] = "chatGPTPro"
+
         var legacySubscription = try XCTUnwrap(savedAccounts.first)
         legacySubscription["id"] = legacySubscriptionID
-        legacySubscription["displayName"] = "Retired subscription"
+        legacySubscription["displayName"] = "Legacy Claude subscription"
         legacySubscription["kind"] = "claudeMax"
 
         var legacyAPIAccount = try XCTUnwrap(savedAccounts.first)
         legacyAPIAccount["id"] = legacyAPIID
-        legacyAPIAccount["displayName"] = "Retired API account"
+        legacyAPIAccount["displayName"] = "Anthropic API account"
         legacyAPIAccount["kind"] = "anthropicAPI"
 
         var legacySubscriptionSnapshot = try XCTUnwrap(savedSnapshots.first)
@@ -216,36 +295,81 @@ final class PersistenceTests: XCTestCase {
         legacySubscriptionSnapshot["accountID"] = legacySubscriptionID
         legacySubscriptionSnapshot["source"] = "manual"
 
+        var legacyChatGPTSnapshot = try XCTUnwrap(savedSnapshots.first)
+        legacyChatGPTSnapshot["id"] = UUID().uuidString
+        legacyChatGPTSnapshot["accountID"] = legacyChatGPTID
+        legacyChatGPTSnapshot["source"] = "chatGPTAppServer"
+
         var legacyAPISnapshot = try XCTUnwrap(savedSnapshots.first)
         legacyAPISnapshot["id"] = UUID().uuidString
         legacyAPISnapshot["accountID"] = legacyAPIID
         legacyAPISnapshot["source"] = "anthropicAdminAPI"
 
-        var retiredSourceOnOpenAIAccount = try XCTUnwrap(savedSnapshots.first)
-        retiredSourceOnOpenAIAccount["id"] = UUID().uuidString
-        retiredSourceOnOpenAIAccount["source"] = "anthropicAdminAPI"
+        var mismatchedSnapshot = try XCTUnwrap(savedSnapshots.first)
+        mismatchedSnapshot["id"] = UUID().uuidString
+        mismatchedSnapshot["source"] = "anthropicAdminAPI"
 
-        root["accounts"] = savedAccounts + [legacySubscription, legacyAPIAccount]
+        root["schemaVersion"] = 1
+        root["accounts"] = savedAccounts + [
+            legacyChatGPT,
+            legacySubscription,
+            legacyAPIAccount
+        ]
         root["snapshots"] = savedSnapshots + [
+            legacyChatGPTSnapshot,
             legacySubscriptionSnapshot,
             legacyAPISnapshot,
-            retiredSourceOnOpenAIAccount
+            mismatchedSnapshot
         ]
         try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
             .write(to: fileURL, options: .atomic)
 
         let migrated = try await store.load()
 
-        XCTAssertEqual(migrated.accounts, [openAIAccount])
-        XCTAssertEqual(migrated.snapshots, [openAISnapshot])
+        XCTAssertEqual(migrated.schemaVersion, PersistentState.currentSchemaVersion)
+        XCTAssertEqual(migrated.accounts.count, 4)
+        XCTAssertEqual(
+            migrated.accounts.map(\.kind),
+            [.openAIAPI, .chatGPTSubscription, .claudeSubscription, .anthropicAPI]
+        )
+        XCTAssertEqual(migrated.snapshots.count, 4)
+        XCTAssertEqual(
+            migrated.snapshots.map(\.source),
+            [.openAIAdminAPI, .chatGPTAppServer, .manual, .anthropicAdminAPI]
+        )
 
         let persistedText = try String(contentsOf: fileURL, encoding: .utf8)
-        XCTAssertFalse(persistedText.contains("claudeMax"))
-        XCTAssertFalse(persistedText.contains("anthropicAPI"))
-        XCTAssertFalse(persistedText.contains("anthropicAdminAPI"))
+        XCTAssertTrue(persistedText.contains("chatGPTSubscription"))
+        XCTAssertTrue(persistedText.contains("claudeSubscription"))
+        XCTAssertTrue(persistedText.contains("anthropicAPI"))
+        XCTAssertTrue(persistedText.contains("anthropicAdminAPI"))
+        XCTAssertFalse(persistedText.contains("\"chatGPTPro\""))
+        XCTAssertFalse(persistedText.contains("\"claudeMax\""))
 
         let reloaded = try await LocalDataStore(directoryURL: temporaryDirectory).load()
         XCTAssertEqual(reloaded, migrated)
+    }
+
+    func testClaudeCodeAccountAndSnapshotSurviveRepeatedLoads() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let account = try makeAccount(kind: .claudeMax)
+        let snapshot = UsageSnapshot.awaitingRefresh(
+            accountID: account.id,
+            source: .claudeCodeOAuth,
+            at: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let expected = PersistentState(accounts: [account], snapshots: [snapshot])
+        let store = try LocalDataStore(directoryURL: temporaryDirectory)
+
+        try await store.save(expected)
+        let firstLoad = try await store.load()
+        let reloadedStore = try LocalDataStore(directoryURL: temporaryDirectory)
+        let secondLoad = try await reloadedStore.load()
+        XCTAssertEqual(firstLoad, expected)
+        XCTAssertEqual(secondLoad, expected)
     }
 
     func testLegacyMigrationFailsClosedAndDoesNotRewriteUnrelatedCorruption() async throws {
@@ -287,6 +411,7 @@ final class PersistenceTests: XCTestCase {
 
         root["accounts"] = accounts
         root["snapshots"] = snapshots
+        root["schemaVersion"] = 1
         let storedData = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
         try storedData.write(to: fileURL, options: .atomic)
 
@@ -318,6 +443,7 @@ final class PersistenceTests: XCTestCase {
         legacyAccount["kind"] = "claudeMax"
         accounts.append(legacyAccount)
         root["accounts"] = accounts
+        root["schemaVersion"] = 1
 
         let storedData = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
         try storedData.write(to: fileURL, options: .atomic)

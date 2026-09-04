@@ -36,33 +36,41 @@ public struct OpenAIUsageProvider: UsageProvider {
 
         var dailyAggregates: [Date: ProviderUsageAggregate] = [:]
         var modelAggregates: [String: ProviderUsageAggregate] = [:]
+        var dailyRequestCounts: [Date: OpenAIRequestCountAggregate] = [:]
+        var modelRequestCounts: [String: OpenAIRequestCountAggregate] = [:]
+        var totalRequestCount = OpenAIRequestCountAggregate()
 
         for bucket in usageBuckets {
             let date = Date(timeIntervalSince1970: TimeInterval(bucket.startTime))
             for result in bucket.results {
-                let inputTokens = result.inputTokens ?? 0
-                let cachedInputTokens = result.inputCachedTokens ?? 0
-                let outputTokens = result.outputTokens ?? 0
-                let requests = result.requestCount ?? 0
+                let inputTokens = result.inputTokens
+                let cachedInputTokens = result.inputCachedTokens
+                let outputTokens = result.outputTokens
                 try dailyAggregates[date, default: ProviderUsageAggregate()].add(
                     inputTokens: inputTokens,
                     cachedInputTokens: cachedInputTokens,
-                    outputTokens: outputTokens,
-                    requests: requests
+                    outputTokens: outputTokens
+                )
+                try dailyRequestCounts[date, default: OpenAIRequestCountAggregate()].add(
+                    result.requestCount
                 )
 
                 let model = result.model?.nilIfBlank ?? "Unattributed"
                 try modelAggregates[model, default: ProviderUsageAggregate()].add(
                     inputTokens: inputTokens,
                     cachedInputTokens: cachedInputTokens,
-                    outputTokens: outputTokens,
-                    requests: requests
+                    outputTokens: outputTokens
                 )
+                try modelRequestCounts[model, default: OpenAIRequestCountAggregate()].add(
+                    result.requestCount
+                )
+                try totalRequestCount.add(result.requestCount)
             }
         }
 
         var warnings: [String] = []
         let costMetric: Metric<Double>
+        var dailyCosts: [Date: Double] = [:]
         do {
             let costBuckets = try await fetchCostBuckets(
                 account: account,
@@ -73,19 +81,22 @@ public struct OpenAIUsageProvider: UsageProvider {
             for bucket in costBuckets {
                 let date = Date(timeIntervalSince1970: TimeInterval(bucket.startTime))
                 var dailyCost = 0.0
-                for result in bucket.results where result.amount.currency.lowercased() == "usd" {
+                for result in bucket.results {
+                    guard result.amount.currency.uppercased() == "USD" else {
+                        throw ProviderError.invalidResponse
+                    }
                     dailyCost = try checkedProviderCostSum(dailyCost, result.amount.value.value)
                 }
                 totalCost = try checkedProviderCostSum(totalCost, dailyCost)
-                try dailyAggregates[date, default: ProviderUsageAggregate()].add(
-                    inputTokens: 0,
-                    cachedInputTokens: 0,
-                    outputTokens: 0,
-                    costUSD: dailyCost
+                dailyCosts[date] = try checkedProviderCostSum(
+                    dailyCosts[date] ?? 0,
+                    dailyCost
                 )
             }
             costMetric = .available(totalCost)
         } catch {
+            try Self.rethrowIfCancellation(error)
+            dailyCosts.removeAll(keepingCapacity: false)
             costMetric = .unavailable(
                 UnavailableMetric(
                     reason: .refreshFailed,
@@ -93,6 +104,14 @@ public struct OpenAIUsageProvider: UsageProvider {
                 )
             )
             warnings.append("Token usage loaded, but OpenAI cost data could not be refreshed.")
+        }
+        for (date, dailyCost) in dailyCosts {
+            try dailyAggregates[date, default: ProviderUsageAggregate()].add(
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                costUSD: dailyCost
+            )
         }
 
         let dailyUsage = try dailyAggregates
@@ -103,7 +122,7 @@ public struct OpenAIUsageProvider: UsageProvider {
                     inputTokens: aggregate.inputTokens,
                     cachedInputTokens: aggregate.cachedInputTokens,
                     outputTokens: aggregate.outputTokens,
-                    requests: aggregate.requests,
+                    requests: dailyRequestCounts[date]?.value,
                     costUSD: aggregate.costUSD
                 )
             }
@@ -117,7 +136,7 @@ public struct OpenAIUsageProvider: UsageProvider {
                     inputTokens: aggregate.inputTokens,
                     cachedInputTokens: aggregate.cachedInputTokens,
                     outputTokens: aggregate.outputTokens,
-                    requests: aggregate.requests
+                    requests: modelRequestCounts[model]?.value
                 )
             }
             .sorted {
@@ -132,8 +151,7 @@ public struct OpenAIUsageProvider: UsageProvider {
             try totals.add(
                 inputTokens: aggregate.inputTokens,
                 cachedInputTokens: aggregate.cachedInputTokens,
-                outputTokens: aggregate.outputTokens,
-                requests: aggregate.requests
+                outputTokens: aggregate.outputTokens
             )
         }
 
@@ -145,6 +163,13 @@ public struct OpenAIUsageProvider: UsageProvider {
             reason: .notExposedByProvider,
             detail: "OpenAI's organization usage API does not provide a subscription reset time."
         )
+        let requestsMetric: Metric<Int> = totalRequestCount.value.map(Metric.available)
+            ?? .unavailable(
+                UnavailableMetric(
+                    reason: .notReturned,
+                    detail: "OpenAI did not return a request count for every usage result."
+                )
+            )
 
         return ProviderFetchResult(
             snapshot: UsageSnapshot(
@@ -165,13 +190,22 @@ public struct OpenAIUsageProvider: UsageProvider {
                 inputTokens: .available(totals.inputTokens),
                 cachedInputTokens: .available(totals.cachedInputTokens),
                 outputTokens: .available(totals.outputTokens),
-                requests: .available(totals.requests),
+                requests: requestsMetric,
                 costUSD: costMetric,
                 modelUsage: .available(modelUsage),
                 dailyUsage: .available(dailyUsage)
             ),
             warnings: warnings
         )
+    }
+
+    private static func rethrowIfCancellation(_ error: Error) throws {
+        if error is CancellationError
+            || (error as? URLError)?.code == .cancelled
+            || Task.isCancelled
+        {
+            throw CancellationError()
+        }
     }
 
     private func fetchUsageBuckets(
@@ -323,9 +357,9 @@ private struct OpenAIUsageBucket: Decodable {
 }
 
 private struct OpenAIUsageResult: Decodable {
-    let inputTokens: Int?
-    let inputCachedTokens: Int?
-    let outputTokens: Int?
+    let inputTokens: Int
+    let inputCachedTokens: Int
+    let outputTokens: Int
     let requestCount: Int?
     let model: String?
 
@@ -335,6 +369,23 @@ private struct OpenAIUsageResult: Decodable {
         case outputTokens = "output_tokens"
         case requestCount = "num_model_requests"
         case model
+    }
+}
+
+private struct OpenAIRequestCountAggregate {
+    private(set) var total = 0
+    private(set) var isComplete = true
+
+    mutating func add(_ count: Int?) throws {
+        guard let count else {
+            isComplete = false
+            return
+        }
+        total = try checkedProviderSum([total, count])
+    }
+
+    var value: Int? {
+        isComplete ? total : nil
     }
 }
 

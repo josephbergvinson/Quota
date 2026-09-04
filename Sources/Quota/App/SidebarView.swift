@@ -76,30 +76,37 @@ private struct AccountSidebarRow: View {
 
     @ViewBuilder
     private var statusIndicator: some View {
-        switch model.refreshStates[account.id] ?? .idle {
-        case .refreshing:
+        if model.connectionStates[account.id]?.isInProgress == true {
             ProgressView()
                 .controlSize(.mini)
-                .help("Refreshing")
-                .accessibilityLabel("Refreshing account usage")
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-                .help("Refresh failed")
-                .accessibilityLabel("Refresh failed")
-        default:
-            let capacity = UsageAnalytics.capacity(
-                for: account,
-                snapshot: model.latestSnapshots[account.id],
-                now: model.now
-            )
-            let status = capacity.status
-            Image(systemName: status.indicatorSymbolName)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(status.color)
-                .frame(width: 12, height: 12)
-                .help(status.label)
-                .accessibilityLabel(status.label)
+                .help("Waiting for sign-in")
+                .accessibilityLabel("Waiting for account sign-in")
+        } else {
+            switch model.refreshStates[account.id] ?? .idle {
+            case .refreshing:
+                ProgressView()
+                    .controlSize(.mini)
+                    .help("Refreshing")
+                    .accessibilityLabel("Refreshing account usage")
+            case .failed:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("Refresh failed")
+                    .accessibilityLabel("Refresh failed")
+            default:
+                let capacity = UsageAnalytics.capacity(
+                    for: account,
+                    snapshot: model.latestSnapshots[account.id],
+                    now: model.now
+                )
+                let status = capacity.status
+                Image(systemName: status.indicatorSymbolName)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(status.color)
+                    .frame(width: 12, height: 12)
+                    .help(status.label)
+                    .accessibilityLabel(status.label)
+            }
         }
     }
 }

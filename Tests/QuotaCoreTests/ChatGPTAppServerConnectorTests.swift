@@ -4,6 +4,113 @@ import XCTest
 @testable import QuotaCore
 
 final class ChatGPTAppServerConnectorTests: XCTestCase {
+    func testProfileCoordinationKeyNormalizesSystemAndCaseAliases() {
+        XCTAssertEqual(
+            chatGPTProfileCoordinationKey(
+                URL(fileURLWithPath: "/tmp/Quota-Profile", isDirectory: true)
+            ),
+            chatGPTProfileCoordinationKey(
+                URL(fileURLWithPath: "/private/tmp/quota-profile", isDirectory: true)
+            )
+        )
+    }
+
+    func testProfileCoordinationPathFoldsOnlyKnownCaseInsensitiveVolumes() {
+        let upper = "/Volumes/Provider/Quota-Profile"
+        let lower = "/Volumes/Provider/quota-profile"
+
+        XCTAssertEqual(
+            normalizedChatGPTProfileCoordinationPath(
+                upper,
+                volumeSupportsCaseSensitiveNames: false
+            ),
+            normalizedChatGPTProfileCoordinationPath(
+                lower,
+                volumeSupportsCaseSensitiveNames: false
+            )
+        )
+        XCTAssertNotEqual(
+            normalizedChatGPTProfileCoordinationPath(
+                upper,
+                volumeSupportsCaseSensitiveNames: true
+            ),
+            normalizedChatGPTProfileCoordinationPath(
+                lower,
+                volumeSupportsCaseSensitiveNames: true
+            )
+        )
+        XCTAssertNotEqual(
+            normalizedChatGPTProfileCoordinationPath(
+                upper,
+                volumeSupportsCaseSensitiveNames: nil
+            ),
+            normalizedChatGPTProfileCoordinationPath(
+                lower,
+                volumeSupportsCaseSensitiveNames: nil
+            )
+        )
+    }
+
+    func testRetiringProfileRejectsQueuedAndFutureOperations() async throws {
+        let coordinator = ChatGPTProfileOperationCoordinator()
+        let profileKey = "/private/tmp/chatgpt-profile-\(UUID().uuidString)"
+
+        let acquiredInitialLease = await coordinator.acquire(profileKey: profileKey)
+        let initialLease = try XCTUnwrap(acquiredInitialLease)
+        let queuedOperation = Task {
+            await coordinator.acquire(profileKey: profileKey)
+        }
+        try await waitForQueuedOperation(in: coordinator, profileKey: profileKey)
+
+        let retirement = Task {
+            await coordinator.retireAndAcquire(profileKey: profileKey)
+        }
+        try await waitForRetirement(in: coordinator, profileKey: profileKey)
+
+        let queuedLease = await queuedOperation.value
+        XCTAssertNil(queuedLease)
+        let futureLease = await coordinator.acquire(profileKey: profileKey)
+        XCTAssertNil(futureLease)
+
+        await coordinator.release(initialLease)
+        let retirementLease = await retirement.value
+        await coordinator.release(retirementLease)
+    }
+
+    func testRetiredProfileCanBeReactivatedAfterAbortedRemoval() async throws {
+        let coordinator = ChatGPTProfileOperationCoordinator()
+        let profileKey = "/private/tmp/chatgpt-profile-\(UUID().uuidString)"
+
+        let retirementLease = await coordinator.retireAndAcquire(profileKey: profileKey)
+        await coordinator.release(retirementLease)
+        let retiredLease = await coordinator.acquire(profileKey: profileKey)
+        XCTAssertNil(retiredLease)
+
+        await coordinator.reactivate(profileKey: profileKey)
+        let acquiredReactivatedLease = await coordinator.acquire(profileKey: profileKey)
+        let reactivatedLease = try XCTUnwrap(acquiredReactivatedLease)
+        await coordinator.release(reactivatedLease)
+    }
+
+    func testCancellingQueuedProfileOperationRemovesItPromptly() async throws {
+        let coordinator = ChatGPTProfileOperationCoordinator()
+        let profileKey = "/private/tmp/chatgpt-profile-\(UUID().uuidString)"
+        let acquiredInitialLease = await coordinator.acquire(profileKey: profileKey)
+        let initialLease = try XCTUnwrap(acquiredInitialLease)
+        let queuedOperation = Task {
+            await coordinator.acquire(profileKey: profileKey)
+        }
+        try await waitForQueuedOperation(in: coordinator, profileKey: profileKey)
+
+        queuedOperation.cancel()
+
+        let queuedLease = await queuedOperation.value
+        XCTAssertNil(queuedLease)
+        let queuedOperationCount = await coordinator.queuedOperationCount(profileKey: profileKey)
+        XCTAssertEqual(queuedOperationCount, 0)
+        await coordinator.release(initialLease)
+    }
+
     func testExecutableDiscoveryPrefersAppBundleOverApplicationsAndPATH() throws {
         let root = try makeTemporaryDirectory()
         let bundledExecutable = root.appendingPathComponent("bundle/codex")
@@ -366,6 +473,165 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
         XCTAssertEqual(telemetry.tokenUsage.dailyUsage?.first?.tokens, 900)
     }
 
+    func testRetiringProfileWaitsForSlowTelemetryAndPreventsProfileRecreation() async throws {
+        let fixture = try makeProcessFixture(script: Self.slowTelemetryAndLogoutFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 2
+        )
+        let telemetryConnector = ChatGPTAppServerConnector(configuration: configuration)
+        let removalConnector = ChatGPTAppServerConnector(configuration: configuration)
+        let allowTelemetryURL = fixture.codexHome.appendingPathComponent("allow-telemetry")
+        defer { try? Data("continue".utf8).write(to: allowTelemetryURL, options: .atomic) }
+
+        let telemetry = Task {
+            try await telemetryConnector.readTelemetry()
+        }
+        try await waitForFile(
+            fixture.codexHome.appendingPathComponent("telemetry-started")
+        )
+
+        let removal = Task {
+            try await removalConnector.retireAndLogout()
+        }
+        let profileKey = chatGPTProfileCoordinationKey(fixture.codexHome)
+        try await waitForRetirement(
+            in: ChatGPTProfileOperationCoordinator.shared,
+            profileKey: profileKey
+        )
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.codexHome.appendingPathComponent("logout-started").path
+            )
+        )
+        do {
+            _ = try await ChatGPTAppServerConnector(configuration: configuration).readRateLimits()
+            XCTFail("Expected work queued after retirement to be rejected")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .profileRetired)
+        }
+        XCTAssertEqual(try fixtureLaunchCount(in: fixture.codexHome), 1)
+
+        try Data("continue".utf8).write(to: allowTelemetryURL, options: .atomic)
+        _ = try await telemetry.value
+        try await removal.value
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: fixture.codexHome.appendingPathComponent("logout-started").path
+            )
+        )
+        XCTAssertEqual(try fixtureLaunchCount(in: fixture.codexHome), 2)
+
+        try FileManager.default.removeItem(at: fixture.codexHome)
+        do {
+            _ = try await ChatGPTAppServerConnector(configuration: configuration).readRateLimits()
+            XCTFail("Expected a retired profile to reject reads after deletion")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .profileRetired)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.codexHome.path))
+    }
+
+    func testCancelledRetirementKeepsProfileBlockedUntilRemovalRollsBack() async throws {
+        let fixture = try makeProcessFixture(script: Self.slowTelemetryAndLogoutFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 2
+        )
+        let telemetryConnector = ChatGPTAppServerConnector(configuration: configuration)
+        let removalConnector = ChatGPTAppServerConnector(configuration: configuration)
+        let allowTelemetryURL = fixture.codexHome.appendingPathComponent("allow-telemetry")
+        defer { try? Data("continue".utf8).write(to: allowTelemetryURL, options: .atomic) }
+
+        let telemetry = Task {
+            try await telemetryConnector.readTelemetry()
+        }
+        try await waitForFile(
+            fixture.codexHome.appendingPathComponent("telemetry-started")
+        )
+
+        let removal = Task {
+            try await removalConnector.retireAndLogout()
+        }
+        let profileKey = chatGPTProfileCoordinationKey(fixture.codexHome)
+        try await waitForRetirement(
+            in: ChatGPTProfileOperationCoordinator.shared,
+            profileKey: profileKey
+        )
+        removal.cancel()
+        try Data("continue".utf8).write(to: allowTelemetryURL, options: .atomic)
+        _ = try await telemetry.value
+
+        do {
+            try await removal.value
+            XCTFail("Expected the cancelled retirement to stop before logout")
+        } catch is CancellationError {
+            // Expected. The profile remains retired until the caller rolls the removal back.
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.codexHome.appendingPathComponent("logout-started").path
+            )
+        )
+        do {
+            _ = try await telemetryConnector.readTelemetry()
+            XCTFail("Expected cancellation to leave the profile retired")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .profileRetired)
+        }
+
+        await ChatGPTAppServerConnector.reactivateProfile(codexHomeURL: fixture.codexHome)
+        let refreshedTelemetry = try await telemetryConnector.readTelemetry()
+        XCTAssertEqual(refreshedTelemetry.tokenUsage.summary.lifetimeTokens, 4_200)
+        XCTAssertEqual(try fixtureLaunchCount(in: fixture.codexHome), 2)
+    }
+
+    func testFailedRetirementCanBeReactivatedForRemovalRetry() async throws {
+        let fixture = try makeProcessFixture(script: Self.slowTelemetryAndLogoutFixtureScript)
+        let configuration = try ChatGPTAppServerConfiguration(
+            codexHomeURL: fixture.codexHome,
+            codexExecutableURL: fixture.executable,
+            requestTimeoutSeconds: 5,
+            loginTimeoutSeconds: 2
+        )
+        try FileManager.default.createDirectory(
+            at: fixture.codexHome,
+            withIntermediateDirectories: true
+        )
+        let failLogoutURL = fixture.codexHome.appendingPathComponent("fail-logout")
+        try Data("fail".utf8).write(to: failLogoutURL, options: .atomic)
+        let connector = ChatGPTAppServerConnector(configuration: configuration)
+
+        do {
+            try await connector.retireAndLogout()
+            XCTFail("Expected logout failure")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .rpcFailure(code: -32_000))
+        }
+        do {
+            _ = try await connector.readTelemetry()
+            XCTFail("Expected failed removal to leave the profile retired")
+        } catch let error as ChatGPTConnectorError {
+            XCTAssertEqual(error, .profileRetired)
+        }
+
+        try FileManager.default.removeItem(at: failLogoutURL)
+        try Data("continue".utf8).write(
+            to: fixture.codexHome.appendingPathComponent("allow-telemetry"),
+            options: .atomic
+        )
+        await ChatGPTAppServerConnector.reactivateProfile(codexHomeURL: fixture.codexHome)
+        let telemetry = try await connector.readTelemetry()
+        XCTAssertEqual(telemetry.rateLimits.rateLimits.primary?.usedPercent, 61)
+        XCTAssertEqual(try fixtureLaunchCount(in: fixture.codexHome), 2)
+    }
+
     func testTelemetryRetriesOneTimedOutReadInANewProcess() async throws {
         let fixture = try makeProcessFixture(script: Self.telemetryRetryFixtureScript)
         let configuration = try ChatGPTAppServerConfiguration(
@@ -573,6 +839,50 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
     }
 
+    private func waitForQueuedOperation(
+        in coordinator: ChatGPTProfileOperationCoordinator,
+        profileKey: String
+    ) async throws {
+        for _ in 0..<200 {
+            if await coordinator.queuedOperationCount(profileKey: profileKey) > 0 {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw FixtureWaitError.timedOut
+    }
+
+    private func waitForRetirement(
+        in coordinator: ChatGPTProfileOperationCoordinator,
+        profileKey: String
+    ) async throws {
+        for _ in 0..<200 {
+            if await coordinator.isRetired(profileKey: profileKey) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw FixtureWaitError.timedOut
+    }
+
+    private func waitForFile(_ url: URL) async throws {
+        for _ in 0..<500 {
+            if FileManager.default.fileExists(atPath: url.path) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw FixtureWaitError.timedOut
+    }
+
+    private func fixtureLaunchCount(in codexHome: URL) throws -> Int {
+        let text = try String(
+            contentsOf: codexHome.appendingPathComponent("fixture-launch-count"),
+            encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try XCTUnwrap(Int(text))
+    }
+
     private func fixtureAttemptCount(in codexHome: URL) throws -> Int {
         let text = try String(
             contentsOf: codexHome.appendingPathComponent("fixture-attempt"),
@@ -616,6 +926,48 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
           printf '%s\n' '{"id":4,"result":{"summary":{"lifetimeTokens":4200},"dailyUsageBuckets":[{"startDate":"2026-09-01","tokens":900}],"threadUsage":null}}'
           ;;
         *account*read*)
+          printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.com","planType":"pro"},"requiresOpenaiAuth":true}}'
+          ;;
+      esac
+    done
+    """#
+
+    private static let slowTelemetryAndLogoutFixtureScript = #"""
+    #!/bin/sh
+    launch_file="$CODEX_HOME/fixture-launch-count"
+    launch_count=1
+    if [ -f "$launch_file" ]; then
+      launch_count=$(( $(cat "$launch_file") + 1 ))
+    fi
+    printf '%s\n' "$launch_count" > "$launch_file"
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialized"'*)
+          ;;
+        *'"method":"initialize"'*)
+          printf '{"id":1,"result":{"userAgent":"fixture","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}\n' "$CODEX_HOME"
+          ;;
+        *account*logout*)
+          : > "$CODEX_HOME/logout-started"
+          if [ -f "$CODEX_HOME/fail-logout" ]; then
+            printf '%s\n' '{"id":2,"error":{"code":-32000,"message":"fixture logout failure"}}'
+          else
+            printf '%s\n' '{"id":2,"result":{}}'
+          fi
+          ;;
+        *account*rateLimits*read*)
+          printf '%s\n' '{"id":3,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":61,"windowDurationMins":300,"resetsAt":1788264000}},"rateLimitsByLimitId":null,"rateLimitResetCredits":null}}'
+          ;;
+        *account*usage*read*)
+          printf '%s\n' '{"id":4,"result":{"summary":{"lifetimeTokens":4200},"dailyUsageBuckets":[{"startDate":"2026-09-01","tokens":900}],"threadUsage":null}}'
+          ;;
+        *account*read*)
+          : > "$CODEX_HOME/telemetry-started"
+          wait_count=0
+          while [ ! -f "$CODEX_HOME/allow-telemetry" ] && [ "$wait_count" -lt 500 ]; do
+            sleep 0.01
+            wait_count=$((wait_count + 1))
+          done
           printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.com","planType":"pro"},"requiresOpenaiAuth":true}}'
           ;;
       esac
@@ -783,4 +1135,8 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
     done
     while :; do :; done
     """#
+}
+
+private enum FixtureWaitError: Error {
+    case timedOut
 }

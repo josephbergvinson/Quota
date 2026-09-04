@@ -26,6 +26,7 @@ struct ResetPlannerView: View {
             snapshots: model.state.snapshots,
             in: resetInterval
         )
+        .filter { $0.resetsAt >= model.now }
     }
 
     var body: some View {
@@ -33,7 +34,6 @@ struct ResetPlannerView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 currentCapacityStrip
-                sourceNotice
                 resetCalendar
             }
             .padding(24)
@@ -44,7 +44,7 @@ struct ResetPlannerView: View {
     private var header: some View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("7-day reset calendar")
+                Text("Today + next 7 days")
                     .font(.largeTitle.weight(.semibold))
                 Text(rangeTitle)
                     .font(.title3)
@@ -70,6 +70,8 @@ struct ResetPlannerView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         ForEach(model.dashboardSummary.capacities, id: \.account.id) { capacity in
+                            let usesLastReported = capacity.isStale
+                                || didRefreshFail(for: capacity.account.id)
                             Button {
                                 model.selection = .account(capacity.account.id)
                             } label: {
@@ -80,12 +82,14 @@ struct ResetPlannerView: View {
                                             .font(.callout.weight(.medium))
                                             .lineLimit(1)
                                         Text(capacity.remainingFraction.map {
-                                            capacity.isStale
-                                                ? "\(QuotaFormat.percentage($0)) left · stale"
+                                            usesLastReported
+                                                ? "\(QuotaFormat.percentage($0)) last reported"
                                                 : "\(QuotaFormat.percentage($0)) left"
                                         } ?? "Capacity unavailable")
                                         .font(.caption)
-                                        .foregroundStyle(capacity.status.color)
+                                        .foregroundStyle(
+                                            usesLastReported ? CapacityStatus.stale.color : capacity.status.color
+                                        )
                                     }
                                 }
                                 .padding(.horizontal, 11)
@@ -102,19 +106,6 @@ struct ResetPlannerView: View {
                 }
             }
         }
-    }
-
-    private var sourceNotice: some View {
-        Label {
-            Text("This calendar shows reset times reported by the provider. Quota does not invent repeating events.")
-        } icon: {
-            Image(systemName: "checkmark.shield")
-        }
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var resetCalendar: some View {
@@ -143,9 +134,16 @@ struct ResetPlannerView: View {
         return "\(resetInterval.start.formatted(.dateTime.month(.abbreviated).day())) – \(lastDay.formatted(.dateTime.month(.abbreviated).day().year()))"
     }
 
+    private func didRefreshFail(for accountID: UUID) -> Bool {
+        if case .failed = model.refreshStates[accountID] {
+            return true
+        }
+        return false
+    }
 }
 
 private struct ResetDayColumn: View {
+    @EnvironmentObject private var model: AppModel
     let day: Date
     let events: [ResetEvent]
     let calendar: Calendar
@@ -180,7 +178,11 @@ private struct ResetDayColumn: View {
                 .frame(maxWidth: .infinity, minHeight: 90)
             } else {
                 ForEach(events) { event in
-                    ResetEventCard(event: event, now: now)
+                    ResetEventCard(
+                        event: event,
+                        now: now,
+                        refreshFailed: didRefreshFail(for: event.account.id)
+                    )
                 }
             }
             Spacer(minLength: 0)
@@ -200,14 +202,24 @@ private struct ResetDayColumn: View {
                 )
         }
     }
+
+    private func didRefreshFail(for accountID: UUID) -> Bool {
+        if case .failed = model.refreshStates[accountID] {
+            return true
+        }
+        return false
+    }
 }
 
 private struct ResetEventCard: View {
     let event: ResetEvent
     let now: Date
+    let refreshFailed: Bool
 
-    private var isPast: Bool {
-        event.resetsAt < now
+    private var isStale: Bool {
+        refreshFailed
+            || now.timeIntervalSince(event.capturedAt) > UsageAnalytics.capacityFreshnessInterval
+            || event.capturedAt.timeIntervalSince(now) > 5 * 60
     }
 
     var body: some View {
@@ -225,7 +237,9 @@ private struct ResetEventCard: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             Label(
-                "\(QuotaFormat.percentage(event.remainingFraction)) left",
+                isStale
+                    ? "\(QuotaFormat.percentage(event.remainingFraction)) last reported"
+                    : "\(QuotaFormat.percentage(event.remainingFraction)) left",
                 systemImage: capacityStatus.indicatorSymbolName
             )
             .font(.caption.weight(.semibold))
@@ -245,11 +259,10 @@ private struct ResetEventCard: View {
                 .frame(width: 3)
                 .padding(.vertical, 5)
         }
-        .opacity(isPast ? 0.65 : 1)
         .accessibilityElement(children: .combine)
     }
 
     private var capacityStatus: CapacityStatus {
-        .freshStatus(forRemainingFraction: event.remainingFraction)
+        isStale ? .stale : .freshStatus(forRemainingFraction: event.remainingFraction)
     }
 }

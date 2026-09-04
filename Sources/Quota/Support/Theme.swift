@@ -6,6 +6,8 @@ extension ProviderKind {
         switch self {
         case .openAI:
             Color(red: 0.08, green: 0.58, blue: 0.45)
+        case .anthropic:
+            Color(red: 0.82, green: 0.42, blue: 0.27)
         }
     }
 
@@ -13,6 +15,8 @@ extension ProviderKind {
         switch self {
         case .openAI:
             "sparkles"
+        case .anthropic:
+            "sun.max.fill"
         }
     }
 }
@@ -71,7 +75,7 @@ enum QuotaFormat {
 
     static func amount(_ value: Double, unit: UsageUnit) -> String {
         switch unit {
-        case .messages, .tokens:
+        case .messages, .tokens, .credits:
             value.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
         case .dollars:
             value.formatted(.currency(code: "USD").precision(.fractionLength(0...2)))

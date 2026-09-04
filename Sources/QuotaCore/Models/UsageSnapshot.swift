@@ -3,6 +3,7 @@ import Foundation
 public enum UsageUnit: String, Codable, CaseIterable, Identifiable, Sendable {
     case messages
     case tokens
+    case credits
     case dollars
     case percent
 
@@ -14,6 +15,8 @@ public enum UsageUnit: String, Codable, CaseIterable, Identifiable, Sendable {
             "messages"
         case .tokens:
             "tokens"
+        case .credits:
+            "credits"
         case .dollars:
             "USD"
         case .percent:
@@ -84,20 +87,21 @@ public struct ModelUsage: Codable, Equatable, Identifiable, Sendable {
     public let inputTokens: Int
     public let cachedInputTokens: Int
     public let outputTokens: Int
-    public let requests: Int
+    /// `nil` when the provider reports token totals but no request count.
+    public let requests: Int?
 
     public init(
         model: String,
         inputTokens: Int,
         cachedInputTokens: Int,
         outputTokens: Int,
-        requests: Int
+        requests: Int? = nil
     ) {
         self.model = model
         self.inputTokens = max(0, inputTokens)
         self.cachedInputTokens = max(0, cachedInputTokens)
         self.outputTokens = max(0, outputTokens)
-        self.requests = max(0, requests)
+        self.requests = requests.map { max(0, $0) }
     }
 
     public var totalTokens: Int {
@@ -113,7 +117,8 @@ public struct DailyUsagePoint: Codable, Equatable, Identifiable, Sendable {
     public let cachedInputTokens: Int
     public let outputTokens: Int
     public let unattributedTokens: Int
-    public let requests: Int
+    /// `nil` when the provider reports this bucket without a request count.
+    public let requests: Int?
     public let costUSD: Double
 
     public init(
@@ -122,7 +127,7 @@ public struct DailyUsagePoint: Codable, Equatable, Identifiable, Sendable {
         cachedInputTokens: Int = 0,
         outputTokens: Int = 0,
         unattributedTokens: Int = 0,
-        requests: Int = 0,
+        requests: Int? = nil,
         costUSD: Double = 0
     ) {
         self.date = date
@@ -130,7 +135,7 @@ public struct DailyUsagePoint: Codable, Equatable, Identifiable, Sendable {
         self.cachedInputTokens = max(0, cachedInputTokens)
         self.outputTokens = max(0, outputTokens)
         self.unattributedTokens = max(0, unattributedTokens)
-        self.requests = max(0, requests)
+        self.requests = requests.map { max(0, $0) }
         self.costUSD = max(0, costUSD)
     }
 
@@ -235,7 +240,28 @@ public struct BankedResetCredits: Codable, Equatable, Sendable {
 public enum UsageSource: String, Codable, Sendable {
     case manual
     case chatGPTAppServer
+    case claudeCodeOAuth
     case openAIAdminAPI
+    case anthropicAdminAPI
+
+    public var dataSource: UsageDataSourceKind? {
+        switch self {
+        case .manual:
+            nil
+        case .chatGPTAppServer:
+            .chatGPTAppServer
+        case .claudeCodeOAuth:
+            .claudeCodeOAuth
+        case .openAIAdminAPI:
+            .openAIAdminAPI
+        case .anthropicAdminAPI:
+            .anthropicAdminAPI
+        }
+    }
+
+    public func isCompatible(with accountKind: AccountKind) -> Bool {
+        dataSource.map { $0 == accountKind.dataSource } ?? true
+    }
 }
 
 public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {

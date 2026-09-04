@@ -11,6 +11,9 @@ public struct DashboardTokenBreakdown: Sendable, Equatable {
     public let accountCount: Int
     public let accountsReportingDailyUsage: Int
     public let accountsReportingTokenSplit: Int
+    public let accountsReportingCost: Int
+    /// Providers with at least one selected daily point backed by reported cost data.
+    public let costContributingProviders: Set<ProviderKind>
 
     public init(
         interval: DateInterval,
@@ -22,7 +25,9 @@ public struct DashboardTokenBreakdown: Sendable, Equatable {
         unattributedTokens: Int?,
         accountCount: Int,
         accountsReportingDailyUsage: Int,
-        accountsReportingTokenSplit: Int
+        accountsReportingTokenSplit: Int,
+        accountsReportingCost: Int,
+        costContributingProviders: Set<ProviderKind>
     ) {
         self.interval = interval
         self.dailyPoints = dailyPoints
@@ -34,6 +39,8 @@ public struct DashboardTokenBreakdown: Sendable, Equatable {
         self.accountCount = accountCount
         self.accountsReportingDailyUsage = accountsReportingDailyUsage
         self.accountsReportingTokenSplit = accountsReportingTokenSplit
+        self.accountsReportingCost = accountsReportingCost
+        self.costContributingProviders = costContributingProviders
     }
 }
 
@@ -47,6 +54,7 @@ private struct SelectedSnapshotDayPoint {
     let capturedAt: Date
     let snapshotIndex: Int
     let reportsTokenSplit: Bool
+    let reportsCost: Bool
 }
 
 public extension UsageAnalytics {
@@ -108,6 +116,8 @@ public extension UsageAnalytics {
         var allDailyValuesAreValid = true
         var dailyReportingCount = 0
         var splitReportingCount = 0
+        var costReportingCount = 0
+        var costContributingProviders: Set<ProviderKind> = []
         var splitInput = 0
         var splitCached = 0
         var splitOutput = 0
@@ -152,7 +162,8 @@ public extension UsageAnalytics {
                         point: point,
                         capturedAt: candidate.snapshot.capturedAt,
                         snapshotIndex: candidate.index,
-                        reportsTokenSplit: reportsTokenSplit
+                        reportsTokenSplit: reportsTokenSplit,
+                        reportsCost: candidate.snapshot.costUSD.value != nil
                     )
                 }
             }
@@ -168,13 +179,22 @@ public extension UsageAnalytics {
             }
 
             let reportsSplit: Bool
+            let reportsCost: Bool
             if selectedPointsByDay.isEmpty {
                 let latestDailySnapshot = dailySnapshots.max {
                     isMoreRecent($1, than: $0)
                 }
                 reportsSplit = latestDailySnapshot.map { reportsTokenSplit($0.snapshot) } ?? false
+                reportsCost = latestDailySnapshot?.snapshot.costUSD.value != nil
             } else {
                 reportsSplit = selectedPointsByDay.values.allSatisfy(\.reportsTokenSplit)
+                reportsCost = selectedPointsByDay.values.allSatisfy(\.reportsCost)
+            }
+            if reportsCost {
+                costReportingCount += 1
+                if !selectedPointsByDay.isEmpty {
+                    costContributingProviders.insert(account.kind.provider)
+                }
             }
             guard reportsSplit else { continue }
 
@@ -236,7 +256,9 @@ public extension UsageAnalytics {
             unattributedTokens: unattributedTokens,
             accountCount: accounts.count,
             accountsReportingDailyUsage: dailyReportingCount,
-            accountsReportingTokenSplit: splitReportingCount
+            accountsReportingTokenSplit: splitReportingCount,
+            accountsReportingCost: costReportingCount,
+            costContributingProviders: costContributingProviders
         )
     }
 
@@ -276,7 +298,7 @@ public extension UsageAnalytics {
                 && point.cachedInputTokens <= point.inputTokens
                 && point.outputTokens >= 0
                 && point.unattributedTokens >= 0
-                && point.requests >= 0
+                && point.requests.map { $0 >= 0 } ?? true
                 && point.costUSD.isFinite
                 && point.costUSD >= 0
         }) else {
@@ -293,7 +315,7 @@ public extension UsageAnalytics {
         var cachedInputTokens = 0
         var outputTokens = 0
         var unattributedTokens = 0
-        var requests = 0
+        var requests: Int? = 0
         var costUSD = 0.0
         var cumulativePoints: [DailyUsagePoint] = []
         cumulativePoints.reserveCapacity(sortedPoints.count)
@@ -311,11 +333,18 @@ public extension UsageAnalytics {
                     unattributedTokens,
                     point.unattributedTokens
                 ),
-                let nextRequests = checkedAdd(requests, point.requests),
                 let attributedTokens = checkedAdd(nextInputTokens, nextOutputTokens),
                 checkedAdd(attributedTokens, nextUnattributedTokens) != nil
             else {
                 return []
+            }
+
+            let nextRequests: Int?
+            if let requests, let pointRequests = point.requests {
+                guard let sum = checkedAdd(requests, pointRequests) else { return [] }
+                nextRequests = sum
+            } else {
+                nextRequests = nil
             }
 
             let nextCostUSD = costUSD + point.costUSD
@@ -359,11 +388,22 @@ public extension UsageAnalytics {
                 previous?.unattributedTokens ?? 0,
                 next.unattributedTokens
             ),
-            let requests = checkedAdd(previous?.requests ?? 0, next.requests),
             let attributedTokens = checkedAdd(inputTokens, outputTokens),
             checkedAdd(attributedTokens, unattributedTokens) != nil
         else {
             return nil
+        }
+
+        let requests: Int?
+        if let previous {
+            if let previousRequests = previous.requests, let nextRequests = next.requests {
+                guard let sum = checkedAdd(previousRequests, nextRequests) else { return nil }
+                requests = sum
+            } else {
+                requests = nil
+            }
+        } else {
+            requests = next.requests
         }
 
         let costUSD = (previous?.costUSD ?? 0) + next.costUSD

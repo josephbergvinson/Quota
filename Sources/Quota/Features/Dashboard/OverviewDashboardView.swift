@@ -66,14 +66,22 @@ struct OverviewDashboardView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
                 header
-                summaryMetrics
+                if hasDailyTokenReporting {
+                    summaryMetrics
+                }
                 recommendation
 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Accounts")
                         .font(.title3.weight(.semibold))
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 270), spacing: 14)],
+                        columns: [
+                            GridItem(
+                                .adaptive(minimum: 270),
+                                spacing: 14,
+                                alignment: .top
+                            )
+                        ],
                         alignment: .leading,
                         spacing: 14
                     ) {
@@ -84,7 +92,15 @@ struct OverviewDashboardView: View {
                 }
 
                 if !tokenBreakdown.dailyPoints.isEmpty {
-                    UsageHistoryChart(points: tokenBreakdown.dailyPoints)
+                    UsageHistoryChart(
+                        points: tokenBreakdown.dailyPoints,
+                        costIsComplete: tokenBreakdown.accountsReportingDailyUsage > 0
+                            && tokenBreakdown.accountsReportingCost
+                                == tokenBreakdown.accountsReportingDailyUsage,
+                        costQualification: tokenBreakdown.costContributingProviders.contains(
+                            .anthropic
+                        ) ? "Anthropic excludes Priority Tier" : nil
+                    )
                 }
             }
             .padding(24)
@@ -104,15 +120,17 @@ struct OverviewDashboardView: View {
             }
             Spacer()
             HStack(spacing: 10) {
-                Picker("Analytics range", selection: $selectedRange) {
-                    ForEach(DashboardRange.allCases) { range in
-                        Text(range.label).tag(range)
+                if hasDailyTokenReporting {
+                    Picker("Analytics range", selection: $selectedRange) {
+                        ForEach(DashboardRange.allCases) { range in
+                            Text(range.label).tag(range)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 190)
+                    .accessibilityLabel("Analytics range")
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 190)
-                .accessibilityLabel("Analytics range")
 
                 if model.isRefreshing {
                     ProgressView()
@@ -124,7 +142,7 @@ struct OverviewDashboardView: View {
 
     @ViewBuilder
     private var recommendation: some View {
-        if let recommendation = model.dashboardSummary.recommendedAccount,
+        if let recommendation = model.recommendedAccount,
            let remaining = recommendation.remainingFraction {
             Button {
                 model.selection = .account(recommendation.account.id)
@@ -169,6 +187,23 @@ struct OverviewDashboardView: View {
                 RoundedRectangle(cornerRadius: 14)
                     .stroke(recommendation.account.kind.provider.tintColor.opacity(0.35), lineWidth: 1)
             }
+        } else if !model.identityWarnings.isEmpty,
+                  model.dashboardSummary.accountsWithKnownCapacity > 0 {
+            HStack(spacing: 12) {
+                Image(systemName: "person.2.badge.exclamationmark")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Account identities need attention")
+                        .font(.headline)
+                    Text("Refresh or reconnect the affected subscriptions before relying on account rotation advice.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
         } else {
             HStack(spacing: 12) {
                 Image(systemName: "gauge.with.dots.needle.0percent")
@@ -177,7 +212,7 @@ struct OverviewDashboardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("No recent capacity reading")
                         .font(.headline)
-                    Text("Refresh a connected account or record a subscription reading to get a recommendation.")
+                    Text("Refresh a connected account to get a recommendation.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -229,7 +264,7 @@ struct OverviewDashboardView: View {
         ContentUnavailableView {
             Label("No accounts yet", systemImage: "gauge.with.dots.needle.0percent")
         } description: {
-            Text("Add a ChatGPT or OpenAI account to start tracking capacity.")
+            Text("Add a ChatGPT, Claude, OpenAI API, or Anthropic API account to start tracking capacity.")
         } actions: {
             Button("Add Account…") {
                 model.isShowingAddAccount = true
@@ -252,14 +287,14 @@ struct OverviewDashboardView: View {
         guard tokenBreakdown.accountsReportingDailyUsage > 0 else {
             return "Daily token history is unavailable from connected providers"
         }
-        return "\(selectedRange.description) · \(tokenBreakdown.accountsReportingDailyUsage) of \(tokenBreakdown.accountCount) accounts"
+        return "\(selectedRange.description) · \(reportingAccountCount(tokenBreakdown.accountsReportingDailyUsage))"
     }
 
     private var splitTokenDetail: String {
         guard tokenBreakdown.accountsReportingTokenSplit > 0 else {
             return "Unavailable for accounts without provider-reported token splits"
         }
-        return "\(selectedRange.description) · \(tokenBreakdown.accountsReportingTokenSplit) of \(tokenBreakdown.accountCount) accounts"
+        return "\(selectedRange.description) · \(reportingAccountCount(tokenBreakdown.accountsReportingTokenSplit))"
     }
 
     private var hasTokenSplit: Bool {
@@ -268,16 +303,25 @@ struct OverviewDashboardView: View {
             || tokenBreakdown.outputTokens != nil
     }
 
+    private var hasDailyTokenReporting: Bool {
+        tokenBreakdown.accountsReportingDailyUsage > 0
+    }
+
     private var uncachedTokenDetail: String {
         guard tokenBreakdown.accountsReportingTokenSplit > 0 else {
             return splitTokenDetail
         }
-        return "\(tokenBreakdown.accountsReportingTokenSplit) of \(tokenBreakdown.accountCount) accounts · includes cache writes"
+        return "\(reportingAccountCount(tokenBreakdown.accountsReportingTokenSplit)) · includes cache writes"
+    }
+
+    private func reportingAccountCount(_ count: Int) -> String {
+        count == 1 ? "Reported by 1 account" : "Reported by \(count) accounts"
     }
 }
 
 private struct AccountCapacityCard: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let capacity: AccountCapacity
 
     var body: some View {
@@ -304,8 +348,9 @@ private struct AccountCapacityCard: View {
                 CapacityBar(capacity: capacity)
 
                 if let bankedResetCredits, bankedResetCredits.availableCount > 0 {
+                    let description = bankedResetDescription(bankedResetCredits)
                     Label(
-                        bankedResetDescription(bankedResetCredits),
+                        description,
                         systemImage: bankedResetHasPassedExpiry(bankedResetCredits)
                             ? "clock.badge.exclamationmark"
                             : "arrow.counterclockwise.circle"
@@ -316,7 +361,8 @@ private struct AccountCapacityCard: View {
                             ? Color.orange
                             : Color.secondary
                     )
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(metadataLineLimit)
+                    .help(description)
                 }
 
                 HStack {
@@ -332,8 +378,14 @@ private struct AccountCapacityCard: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(metadataLineLimit)
 
-                if let capturedAt = capacity.capturedAt {
+                if case .failed = model.refreshStates[capacity.account.id] {
+                    Label("Refresh failed · showing the last saved reading", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(metadataLineLimit)
+                } else if let capturedAt = capacity.capturedAt {
                     Label(
                         capacity.isStale
                             ? "Reading is stale · updated \(capturedAt.formatted(.relative(presentation: .named)))"
@@ -342,15 +394,21 @@ private struct AccountCapacityCard: View {
                     )
                     .font(.caption)
                     .foregroundStyle(capacity.isStale ? Color.orange : Color.secondary)
-                }
-
-                if case .failed = model.refreshStates[capacity.account.id] {
-                    Label("Refresh failed · showing the last saved reading", systemImage: "exclamationmark.triangle")
+                    .lineLimit(metadataLineLimit)
+                } else {
+                    Label("Not refreshed yet", systemImage: "clock")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(metadataLineLimit)
                 }
             }
             .padding(15)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: 190,
+                maxHeight: dynamicTypeSize.isAccessibilitySize ? nil : 190,
+                alignment: .topLeading
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -364,6 +422,10 @@ private struct AccountCapacityCard: View {
 
     private var bankedResetCredits: BankedResetCredits? {
         model.latestSnapshots[capacity.account.id]?.bankedResetCredits.value
+    }
+
+    private var metadataLineLimit: Int {
+        dynamicTypeSize.isAccessibilitySize ? 2 : 1
     }
 
     private var didRefreshFail: Bool {

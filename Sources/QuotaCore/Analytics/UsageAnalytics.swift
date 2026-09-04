@@ -158,8 +158,22 @@ public enum UsageAnalytics {
         let isStale = now.timeIntervalSince(snapshot.capturedAt) > capacityFreshnessInterval
             || snapshot.capturedAt.timeIntervalSince(now) > 5 * 60
 
-        let supportedWindows = supportedQuotaWindows(for: snapshot)
-        let activeWindows = supportedWindows.filter { window in
+        let supportedWindows = supportedQuotaWindows(
+            for: snapshot,
+            accountKind: account.kind
+        )
+        let capacityWindows: [QuotaWindow]
+        if snapshot.source == .claudeCodeOAuth {
+            // Model- and surface-specific Claude limits are useful planning context, but they
+            // do not describe the account's general availability. Keep the dashboard and account
+            // recommendation anchored to the two plan-wide limits shown by Claude Code.
+            capacityWindows = supportedWindows.filter {
+                $0.identifier == "five_hour" || $0.identifier == "seven_day"
+            }
+        } else {
+            capacityWindows = supportedWindows
+        }
+        let activeWindows = capacityWindows.filter { window in
             !isClearlyUninitializedChatGPTWindow(window, in: snapshot)
                 && (window.resetsAt.map { $0 > now } ?? true)
         }
@@ -175,6 +189,7 @@ public enum UsageAnalytics {
         }
 
         if
+            snapshot.source != .claudeCodeOAuth,
             let allowance = snapshot.allowance.value,
             snapshot.resetAt.value.map({ $0 > now }) ?? true
         {
@@ -199,13 +214,18 @@ public enum UsageAnalytics {
     }
 
     /// Returns the quota windows that Quota supports for presentation. ChatGPT-backed Codex can
-    /// expose model-specific and short-duration buckets; Quota's account rotation and planner
-    /// intentionally show only the regular Codex one-week allowance. This also filters older
-    /// saved readings. Manual readings remain untouched.
-    public static func supportedQuotaWindows(for snapshot: UsageSnapshot) -> [QuotaWindow] {
+    /// expose model-specific and unrelated buckets. Quota retains the regular one-week window
+    /// for Pro, plus the regular five-hour window for Plus, while filtering older saved readings
+    /// through the same tier-aware policy. Manual readings remain untouched.
+    public static func supportedQuotaWindows(
+        for snapshot: UsageSnapshot,
+        accountKind: AccountKind
+    ) -> [QuotaWindow] {
         let windows = snapshot.quotaWindows.value ?? []
         guard snapshot.source == .chatGPTAppServer else { return windows }
-        return windows.filter { ChatGPTQuotaWindowPolicy.isSupportedWindow($0) }
+        return windows.filter {
+            ChatGPTQuotaWindowPolicy.isSupportedWindow($0, accountKind: accountKind)
+        }
     }
 
     public static func resetEvents(
@@ -230,7 +250,10 @@ public enum UsageAnalytics {
         for snapshot in snapshots {
             guard let account = accountsByID[snapshot.accountID] else { continue }
             let rawQuotaWindows = snapshot.quotaWindows.value ?? []
-            let quotaWindows = supportedQuotaWindows(for: snapshot)
+            let quotaWindows = supportedQuotaWindows(
+                for: snapshot,
+                accountKind: account.kind
+            )
             for window in quotaWindows {
                 guard !isClearlyUninitializedChatGPTWindow(window, in: snapshot) else { continue }
                 guard let resetsAt = window.resetsAt, interval.containsHalfOpen(resetsAt) else { continue }

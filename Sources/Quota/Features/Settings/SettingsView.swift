@@ -20,7 +20,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Automatic refresh applies to connected ChatGPT accounts and OpenAI API organizations.")
+                Text("Automatic refresh applies to connected ChatGPT, Claude, OpenAI API, and Anthropic API accounts.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -30,8 +30,12 @@ struct SettingsView: View {
                     Text("Local JSON")
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("Provider credentials") {
+                LabeledContent("Quota-stored API keys") {
                     Text("macOS Keychain")
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Managed sign-ins") {
+                    Text("Isolated provider profiles")
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("Telemetry") {
@@ -51,8 +55,12 @@ struct SettingsView: View {
                     systemImage: "building.2"
                 )
                 Label(
-                    "ChatGPT Pro uses OpenAI's local Codex service and keeps each account's managed sign-in isolated.",
+                    "ChatGPT Plus and Pro use OpenAI's local Codex service and keep each account's managed sign-in isolated.",
                     systemImage: "person.crop.circle"
+                )
+                Label(
+                    "Claude Pro and Max use Anthropic's local Claude Code client. Quota receives reported usage windows without reading Claude credentials.",
+                    systemImage: "sun.max"
                 )
             }
             .font(.callout)

@@ -121,6 +121,68 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertEqual(capacity.nextResetAt, limitingReset)
     }
 
+    func testClaudeRecommendationUsesPlanLimitsNotModelSpecificLimitsOrCredits() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = try makeAccount(kind: .claudeMax)
+        let unavailable = UnavailableMetric(
+            reason: .notExposedByProvider,
+            detail: "Unavailable"
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            capturedAt: now,
+            source: .claudeCodeOAuth,
+            reportingPeriod: nil,
+            allowance: .available(try Allowance(used: 99, limit: 100, unit: .dollars)),
+            quotaWindows: .available([
+                try QuotaWindow(
+                    identifier: "five_hour",
+                    name: "5-hour limit",
+                    usedPercent: 25,
+                    resetsAt: now.addingTimeInterval(3_600),
+                    durationMinutes: 300
+                ),
+                try QuotaWindow(
+                    identifier: "seven_day",
+                    name: "7-day limit · all models",
+                    usedPercent: 60,
+                    resetsAt: now.addingTimeInterval(86_400),
+                    durationMinutes: 10_080
+                ),
+                try QuotaWindow(
+                    identifier: "seven_day_oauth_apps",
+                    name: "7-day limit · OAuth apps",
+                    usedPercent: 99,
+                    resetsAt: now.addingTimeInterval(90_000),
+                    durationMinutes: 10_080
+                ),
+                try QuotaWindow(
+                    identifier: "model_scoped:opus",
+                    name: "7-day limit · Opus",
+                    usedPercent: 95,
+                    resetsAt: now.addingTimeInterval(172_800),
+                    durationMinutes: 10_080
+                )
+            ]),
+            resetAt: .available(now.addingTimeInterval(3_600)),
+            bankedResetCredits: .unavailable(unavailable),
+            totalTokens: .unavailable(unavailable),
+            inputTokens: .unavailable(unavailable),
+            cachedInputTokens: .unavailable(unavailable),
+            outputTokens: .unavailable(unavailable),
+            requests: .unavailable(unavailable),
+            costUSD: .unavailable(unavailable),
+            modelUsage: .unavailable(unavailable),
+            dailyUsage: .unavailable(unavailable)
+        )
+
+        let capacity = UsageAnalytics.capacity(for: account, snapshot: snapshot, now: now)
+
+        XCTAssertEqual(capacity.remainingFraction, 0.4)
+        XCTAssertEqual(capacity.limitingWindowName, "7-day limit · all models")
+        XCTAssertEqual(capacity.nextResetAt, now.addingTimeInterval(86_400))
+    }
+
     func testForwardResetIntervalIncludesAnchorAndNextSevenCalendarDays() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -169,6 +231,109 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertEqual(startComponents, DateComponents(year: 2026, month: 3, day: 8, hour: 0))
         XCTAssertEqual(endComponents, DateComponents(year: 2026, month: 3, day: 16, hour: 0))
         XCTAssertEqual(interval.duration, 8 * 24 * 60 * 60 - 60 * 60, accuracy: 0.001)
+    }
+
+    func testClaudeFiveHourResetAppearsBeforeAndAtExhaustionWhenResetIsReported() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let activeAccount = try makeAccount(name: "Active", kind: .claudeMax)
+        let exhaustedAccount = try makeAccount(name: "Exhausted", kind: .claudeMax)
+        let missingResetAccount = try makeAccount(name: "Missing reset", kind: .claudeMax)
+        let activeReset = now.addingTimeInterval(60 * 60)
+        let exhaustedReset = now.addingTimeInterval(2 * 60 * 60)
+
+        let activeSnapshot = try makeClaudeSnapshot(
+            accountID: activeAccount.id,
+            capturedAt: now,
+            fiveHourUsedPercent: 40,
+            resetsAt: activeReset
+        )
+        let exhaustedSnapshot = try makeClaudeSnapshot(
+            accountID: exhaustedAccount.id,
+            capturedAt: now,
+            fiveHourUsedPercent: 100,
+            resetsAt: exhaustedReset
+        )
+        let missingResetSnapshot = try makeClaudeSnapshot(
+            accountID: missingResetAccount.id,
+            capturedAt: now,
+            fiveHourUsedPercent: 70,
+            resetsAt: nil
+        )
+        let interval = DateInterval(
+            start: now,
+            end: now.addingTimeInterval(24 * 60 * 60)
+        )
+
+        let events = UsageAnalytics.resetEvents(
+            accounts: [activeAccount, exhaustedAccount, missingResetAccount],
+            snapshots: [activeSnapshot, exhaustedSnapshot, missingResetSnapshot],
+            in: interval
+        )
+
+        XCTAssertEqual(events.map(\.account.id), [activeAccount.id, exhaustedAccount.id])
+        XCTAssertEqual(events.map(\.windowName), ["5-hour limit", "5-hour limit"])
+        XCTAssertEqual(events.map(\.resetsAt), [activeReset, exhaustedReset])
+        XCTAssertEqual(events[0].remainingFraction, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(events[1].remainingFraction, 0, accuracy: 0.0001)
+    }
+
+    func testChatGPTPlusFiveHourResetAppearsAtExhaustionWhileProKeepsWeeklyOnly() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let plusAccount = try makeAccount(name: "Plus", kind: .chatGPTPlus)
+        let proAccount = try makeAccount(name: "Pro", kind: .chatGPTPro)
+        let fiveHourReset = now.addingTimeInterval(2 * 60 * 60)
+        let weeklyReset = now.addingTimeInterval(5 * 24 * 60 * 60)
+        let fiveHour = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "Codex · 5-hour",
+            usedPercent: 100,
+            resetsAt: fiveHourReset,
+            durationMinutes: 300
+        )
+        let weekly = try QuotaWindow(
+            identifier: "codex:secondary",
+            name: "Codex · 1-week",
+            usedPercent: 45,
+            resetsAt: weeklyReset,
+            durationMinutes: 10_080
+        )
+        let plusSnapshot = makeChatGPTSnapshot(
+            accountID: plusAccount.id,
+            capturedAt: now,
+            windows: [fiveHour, weekly],
+            resetAt: fiveHourReset
+        )
+        let proSnapshot = makeChatGPTSnapshot(
+            accountID: proAccount.id,
+            capturedAt: now,
+            windows: [fiveHour, weekly],
+            resetAt: fiveHourReset
+        )
+        let interval = DateInterval(
+            start: now,
+            end: now.addingTimeInterval(7 * 24 * 60 * 60)
+        )
+
+        let plusCapacity = UsageAnalytics.capacity(
+            for: plusAccount,
+            snapshot: plusSnapshot,
+            now: now
+        )
+        let events = UsageAnalytics.resetEvents(
+            accounts: [plusAccount, proAccount],
+            snapshots: [plusSnapshot, proSnapshot],
+            in: interval
+        )
+        let plusEvents = events.filter { $0.account.id == plusAccount.id }
+        let proEvents = events.filter { $0.account.id == proAccount.id }
+
+        XCTAssertEqual(plusCapacity.limitingWindowName, "Codex · 5-hour")
+        XCTAssertEqual(plusCapacity.remainingFraction, 0)
+        XCTAssertEqual(plusCapacity.nextResetAt, fiveHourReset)
+        XCTAssertEqual(plusEvents.map(\.windowName), ["Codex · 5-hour", "Codex · 1-week"])
+        XCTAssertEqual(plusEvents.map(\.remainingFraction), [0, 0.55])
+        XCTAssertEqual(proEvents.map(\.windowName), ["Codex · 1-week"])
+        XCTAssertEqual(proEvents.map(\.resetsAt), [weeklyReset])
     }
 
     func testExpiredWindowIsNotPresentedAsCurrentCapacity() throws {
@@ -459,7 +624,10 @@ final class UsageAnalyticsTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            UsageAnalytics.supportedQuotaWindows(for: snapshot).map(\.identifier),
+            UsageAnalytics.supportedQuotaWindows(
+                for: snapshot,
+                accountKind: account.kind
+            ).map(\.identifier),
             ["codex:primary"]
         )
         XCTAssertEqual(capacity.limitingWindowName, "codex · 1-week")
@@ -488,7 +656,10 @@ final class UsageAnalyticsTests: XCTestCase {
             capturedAt: now
         )
         XCTAssertEqual(
-            UsageAnalytics.supportedQuotaWindows(for: manualSnapshot).count,
+            UsageAnalytics.supportedQuotaWindows(
+                for: manualSnapshot,
+                accountKind: account.kind
+            ).count,
             1
         )
     }
@@ -511,6 +682,44 @@ final class UsageAnalyticsTests: XCTestCase {
             allowance: .unavailable(unavailable),
             quotaWindows: .available(windows),
             resetAt: resetAt.map(Metric.available) ?? .unavailable(unavailable),
+            totalTokens: .unavailable(unavailable),
+            inputTokens: .unavailable(unavailable),
+            cachedInputTokens: .unavailable(unavailable),
+            outputTokens: .unavailable(unavailable),
+            requests: .unavailable(unavailable),
+            costUSD: .unavailable(unavailable),
+            modelUsage: .unavailable(unavailable),
+            dailyUsage: .unavailable(unavailable)
+        )
+    }
+
+    private func makeClaudeSnapshot(
+        accountID: UUID,
+        capturedAt: Date,
+        fiveHourUsedPercent: Double,
+        resetsAt: Date?
+    ) throws -> UsageSnapshot {
+        let unavailable = UnavailableMetric(
+            reason: .notExposedByProvider,
+            detail: "Unavailable"
+        )
+        return UsageSnapshot(
+            accountID: accountID,
+            capturedAt: capturedAt,
+            source: .claudeCodeOAuth,
+            reportingPeriod: nil,
+            allowance: .unavailable(unavailable),
+            quotaWindows: .available([
+                try QuotaWindow(
+                    identifier: "five_hour",
+                    name: "5-hour limit",
+                    usedPercent: fiveHourUsedPercent,
+                    resetsAt: resetsAt,
+                    durationMinutes: 300
+                )
+            ]),
+            resetAt: resetsAt.map(Metric.available) ?? .unavailable(unavailable),
+            bankedResetCredits: .unavailable(unavailable),
             totalTokens: .unavailable(unavailable),
             inputTokens: .unavailable(unavailable),
             cachedInputTokens: .unavailable(unavailable),
