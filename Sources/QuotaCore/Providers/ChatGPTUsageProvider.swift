@@ -31,6 +31,9 @@ public struct ChatGPTUsageProvider: UsageProvider {
             from: telemetry.rateLimits,
             capturedAt: telemetry.capturedAt
         )
+        let bankedResetCredits = try makeBankedResetCredits(
+            from: telemetry.rateLimits.resetCredits
+        )
 
         let quotaMetric: Metric<[QuotaWindow]> = quotaWindows.isEmpty
             ? .unavailable(
@@ -94,6 +97,7 @@ public struct ChatGPTUsageProvider: UsageProvider {
                 allowance: .unavailable(allowanceUnavailable),
                 quotaWindows: quotaMetric,
                 resetAt: resetMetric,
+                bankedResetCredits: bankedResetCredits,
                 totalTokens: tokenTotal.map(Metric.available)
                     ?? .unavailable(
                         UnavailableMetric(
@@ -198,6 +202,32 @@ public struct ChatGPTUsageProvider: UsageProvider {
         }
     }
 
+    func makeBankedResetCredits(
+        from resetCredits: ChatGPTRateLimitResetCreditsDTO?
+    ) throws -> Metric<BankedResetCredits> {
+        guard let resetCredits else {
+            return .unavailable(
+                UnavailableMetric(
+                    reason: .notReturned,
+                    detail: "Codex did not return banked reset information for this account."
+                )
+            )
+        }
+
+        let credits = try resetCredits.credits?.map { credit in
+            try BankedResetCredit(
+                status: bankedResetStatus(credit.status),
+                expiresAt: credit.expiresAt
+            )
+        }
+        return .available(
+            try BankedResetCredits(
+                availableCount: checkedInt(resetCredits.availableCount),
+                credits: credits
+            )
+        )
+    }
+
     private func isSupportedQuotaWindow(
         _ value: ChatGPTRateLimitWindowDTO,
         dictionaryID: String,
@@ -274,6 +304,10 @@ public struct ChatGPTUsageProvider: UsageProvider {
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .localizedCapitalized
+    }
+
+    private func bankedResetStatus(_ status: String) -> BankedResetCreditStatus {
+        BankedResetCreditStatus(rawValue: status.lowercased()) ?? .unknown
     }
 
     private func checkedInt(_ value: Int64) throws -> Int {

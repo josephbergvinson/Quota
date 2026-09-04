@@ -71,10 +71,12 @@ Running `make install` again replaces only `~/Applications/Quota.app`; it does n
 
 | Account type | Connection | Data shown |
 | --- | --- | --- |
-| ChatGPT Pro | Browser sign-in handled by a locally installed Codex service | Signed-in identity and plan, reported Codex quota windows, used/remaining percentages, reset times, and daily aggregate token activity |
+| ChatGPT Pro | Browser sign-in handled by a locally installed Codex service | Signed-in identity and plan, reported Codex quota windows, used/remaining percentages, reset times, banked resets and their reported expiries, and daily aggregate token activity |
 | OpenAI API organization | Admin API key from an organization owner | 30-day completions token/request history, model breakdown, and organization costs |
 
 ChatGPT telemetry is the supported ChatGPT-backed **Codex** surface. It is not a general API for every quota in ChatGPT web, voice, images, deep research, or other products. Quota preserves the window names returned by Codex and leaves unsupported account-wide model breakdowns unavailable.
+
+When Codex reports earned banked resets, Quota shows the provider's authoritative available count on the account. Credit details can be unavailable or capped, and individual credits may not expire, so Quota labels missing expiry details instead of deriving them from the count.
 
 The Overview uses one common 7-day, 30-day, or all-reported-history range for its headline totals and chart. Total tokens include every account with daily provider data. Cached input, uncached input, and output cards and chart categories appear only when at least one connected provider reports those splits; otherwise the chart is total-only. The usage chart can switch between daily activity and a cumulative running total for the selected range.
 
@@ -98,6 +100,8 @@ The Reset Planner is a compact rolling one-week-ahead calendar in the Mac's curr
 - when that reading was captured.
 
 Historical snapshots preserve past reset events. Quota does not project a repeating schedule from a single reset, so an empty day means “no reset was reported for this day,” not “no reset can occur.”
+
+Banked-reset expiries stay on the Overview and account detail views. They are not placed on this calendar because an expiry removes a saved reset; it does not reset quota capacity.
 
 If a future reset is changed or removed by a newer reading before it occurs, the planner drops the superseded event. Completed resets remain in local history.
 

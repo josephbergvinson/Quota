@@ -27,6 +27,93 @@ final class PersistenceTests: XCTestCase {
         XCTAssertFalse(fileText.contains("api-key"))
     }
 
+    func testLocalDataRoundTripKeepsBankedResetCredits() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = try LocalDataStore(directoryURL: temporaryDirectory)
+        let account = try makeAccount(kind: .chatGPTPro)
+        let unavailable = UnavailableMetric(
+            reason: .notReturned,
+            detail: "Fixture metric is unavailable."
+        )
+        let expiry = Date(timeIntervalSince1970: 1_788_872_400)
+        let bankedResets = try BankedResetCredits(
+            availableCount: 2,
+            credits: [
+                try BankedResetCredit(status: .available, expiresAt: expiry)
+            ]
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            capturedAt: Date(timeIntervalSince1970: 1_788_264_000),
+            source: .chatGPTAppServer,
+            reportingPeriod: nil,
+            allowance: .unavailable(unavailable),
+            quotaWindows: .unavailable(unavailable),
+            resetAt: .unavailable(unavailable),
+            bankedResetCredits: .available(bankedResets),
+            totalTokens: .unavailable(unavailable),
+            inputTokens: .unavailable(unavailable),
+            cachedInputTokens: .unavailable(unavailable),
+            outputTokens: .unavailable(unavailable),
+            requests: .unavailable(unavailable),
+            costUSD: .unavailable(unavailable),
+            modelUsage: .unavailable(unavailable),
+            dailyUsage: .unavailable(unavailable)
+        )
+        let expected = PersistentState(accounts: [account], snapshots: [snapshot])
+
+        try await store.save(expected)
+        let actual = try await store.load()
+
+        XCTAssertEqual(actual, expected)
+    }
+
+    func testLegacySnapshotWithoutBankedResetFieldLoadsAsUnavailable() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = try LocalDataStore(directoryURL: temporaryDirectory)
+        let account = try makeAccount(kind: .chatGPTPro)
+        let snapshot = UsageSnapshot.awaitingRefresh(
+            accountID: account.id,
+            source: .chatGPTAppServer,
+            at: Date(timeIntervalSince1970: 1_788_264_000)
+        )
+        try await store.save(PersistentState(accounts: [account], snapshots: [snapshot]))
+
+        let fileURL = temporaryDirectory.appendingPathComponent(LocalDataStore.stateFileName)
+        var root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
+        )
+        var snapshots = try XCTUnwrap(root["snapshots"] as? [[String: Any]])
+        snapshots[0].removeValue(forKey: "bankedResetCredits")
+        root["snapshots"] = snapshots
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+            .write(to: fileURL, options: .atomic)
+
+        let loaded = try await store.load()
+
+        XCTAssertEqual(loaded.snapshots.count, 1)
+        XCTAssertEqual(
+            loaded.snapshots[0].bankedResetCredits.unavailability?.reason,
+            .notReturned
+        )
+    }
+
+    func testBankedResetCreditsRejectInvalidValues() {
+        XCTAssertThrowsError(try BankedResetCredits(availableCount: -1, credits: nil))
+        XCTAssertThrowsError(
+            try BankedResetCredit(
+                status: .available,
+                expiresAt: Date(timeIntervalSinceReferenceDate: .infinity)
+            )
+        )
+    }
+
     func testLocalDataRejectsOrphanedHistory() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

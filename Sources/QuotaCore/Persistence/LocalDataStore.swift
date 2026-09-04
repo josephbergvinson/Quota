@@ -195,6 +195,9 @@ public actor LocalDataStore {
             if let quotaWindows = snapshot.quotaWindows.value {
                 _ = try quotaWindows.map { try $0.validated() }
             }
+            if let bankedResetCredits = snapshot.bankedResetCredits.value {
+                _ = try bankedResetCredits.validated()
+            }
             if let models = snapshot.modelUsage.value {
                 guard models.allSatisfy({ usage in
                     !usage.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

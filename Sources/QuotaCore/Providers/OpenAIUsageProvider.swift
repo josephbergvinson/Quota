@@ -155,6 +155,12 @@ public struct OpenAIUsageProvider: UsageProvider {
                 allowance: .unavailable(allowanceUnavailable),
                 quotaWindows: .unavailable(allowanceUnavailable),
                 resetAt: .unavailable(resetUnavailable),
+                bankedResetCredits: .unavailable(
+                    UnavailableMetric(
+                        reason: .unsupportedForAccount,
+                        detail: "Banked resets belong to ChatGPT accounts, not API organizations."
+                    )
+                ),
                 totalTokens: .available(try totals.totalTokens()),
                 inputTokens: .available(totals.inputTokens),
                 cachedInputTokens: .available(totals.cachedInputTokens),

@@ -197,6 +197,15 @@ struct AccountDetailView: View {
                     )
                 }
             }
+
+            if let bankedResetCredits = snapshot?.bankedResetCredits.value {
+                Divider()
+                BankedResetCreditsView(
+                    credits: bankedResetCredits,
+                    now: model.now,
+                    isFreshReading: !capacity.isStale && !didRefreshFail
+                )
+            }
         }
         .padding(16)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 14))
@@ -397,6 +406,204 @@ struct AccountDetailView: View {
                 .disabled(model.refreshStates[account.id] == .refreshing)
             }
         }
+    }
+
+    private var didRefreshFail: Bool {
+        if case .failed = model.refreshStates[account.id] {
+            return true
+        }
+        return false
+    }
+}
+
+private struct BankedResetCreditsView: View {
+    let credits: BankedResetCredits
+    let now: Date
+    let isFreshReading: Bool
+
+    private static let collapsedExpiryGroupLimit = 3
+
+    private var displayedCredits: [BankedResetCredit] {
+        let eligibleCredits = (credits.credits ?? []).filter {
+            $0.status == .available || $0.status == .unknown
+        }
+        return Array(
+            eligibleCredits
+                .sorted { left, right in
+                    switch (left.expiresAt, right.expiresAt) {
+                    case let (leftDate?, rightDate?):
+                        leftDate < rightDate
+                    case (_?, nil):
+                        true
+                    case (nil, _?):
+                        false
+                    case (nil, nil):
+                        false
+                    }
+                }
+                .prefix(credits.availableCount)
+        )
+    }
+
+    private var expiryGroups: [ExpiryGroup] {
+        Dictionary(grouping: displayedCredits, by: \.expiresAt)
+            .compactMap { date, groupedCredits in
+                guard let date else { return nil }
+                return ExpiryGroup(
+                    date: date,
+                    count: groupedCredits.count,
+                    hasUncertainStatus: groupedCredits.contains { $0.status == .unknown }
+                )
+            }
+            .sorted { $0.date < $1.date }
+    }
+
+    private var nonExpiringCount: Int {
+        displayedCredits.filter { $0.expiresAt == nil }.count
+    }
+
+    private var hasUncertainNonExpiringCredit: Bool {
+        displayedCredits.contains { $0.expiresAt == nil && $0.status == .unknown }
+    }
+
+    private var visibleExpiryGroups: [ExpiryGroup] {
+        Array(expiryGroups.prefix(Self.collapsedExpiryGroupLimit))
+    }
+
+    private var hiddenExpiryGroups: [ExpiryGroup] {
+        Array(expiryGroups.dropFirst(Self.collapsedExpiryGroupLimit))
+    }
+
+    private var missingDetailCount: Int {
+        max(0, credits.availableCount - displayedCredits.count)
+    }
+
+    private var hasPassedReportedExpiry: Bool {
+        expiryGroups.contains { $0.date <= now }
+    }
+
+    private var usesLastReportedLanguage: Bool {
+        !isFreshReading || hasPassedReportedExpiry
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Banked resets", systemImage: "arrow.counterclockwise.circle")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Text(
+                    usesLastReportedLanguage
+                        ? "Last reported: \(credits.availableCount)"
+                        : "\(credits.availableCount) available"
+                )
+                    .font(.callout.weight(.semibold))
+            }
+
+            if credits.availableCount == 0 {
+                Text(
+                    usesLastReportedLanguage
+                        ? "No banked resets were reported in this reading."
+                        : "No banked resets available."
+                )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(visibleExpiryGroups) { group in
+                    expiryRow(group)
+                }
+
+                if !hiddenExpiryGroups.isEmpty {
+                    DisclosureGroup(
+                        hiddenExpiryGroups.count == 1
+                            ? "Show 1 more expiry time"
+                            : "Show \(hiddenExpiryGroups.count) more expiry times"
+                    ) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(hiddenExpiryGroups) { group in
+                                expiryRow(group)
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                if nonExpiringCount > 0 {
+                    Label(
+                        nonExpiringDescription,
+                        systemImage: "infinity"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                if missingDetailCount > 0 {
+                    Label(
+                        missingDetailCount == 1
+                            ? "Expiry details unavailable for 1 banked reset"
+                            : "Expiry details unavailable for \(missingDetailCount) banked resets",
+                        systemImage: "questionmark.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .help("Earned Codex rate-limit resets reported by OpenAI")
+    }
+
+    private var nonExpiringDescription: String {
+        if usesLastReportedLanguage || hasUncertainNonExpiringCredit {
+            return nonExpiringCount == 1
+                ? "1 reset was reported as non-expiring"
+                : "\(nonExpiringCount) resets were reported as non-expiring"
+        }
+        return nonExpiringCount == 1
+            ? "1 banked reset does not expire"
+            : "\(nonExpiringCount) banked resets do not expire"
+    }
+
+    private func expiryRow(_ group: ExpiryGroup) -> some View {
+        let label = expiryLabel(for: group)
+        let formattedDate = group.date.formatted(date: .abbreviated, time: .shortened)
+        let isPast = group.date <= now
+
+        return HStack(alignment: .firstTextBaseline) {
+            Label(label, systemImage: isPast ? "clock.badge.exclamationmark" : "clock")
+            Spacer(minLength: 12)
+            Text(formattedDate)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.caption)
+        .foregroundStyle(isPast ? Color.orange : Color.secondary)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(formattedDate)")
+    }
+
+    private func expiryLabel(for group: ExpiryGroup) -> String {
+        if group.date <= now {
+            return group.count == 1
+                ? "1 reported expiry passed"
+                : "\(group.count) reported expiries passed"
+        }
+        if usesLastReportedLanguage || group.hasUncertainStatus {
+            return group.count == 1
+                ? "1 reported expiry"
+                : "\(group.count) reported expiries"
+        }
+        return group.count == 1
+            ? "1 reset expires"
+            : "\(group.count) resets expire"
+    }
+
+    private struct ExpiryGroup: Identifiable {
+        let date: Date
+        let count: Int
+        let hasUncertainStatus: Bool
+
+        var id: Date { date }
     }
 }
 

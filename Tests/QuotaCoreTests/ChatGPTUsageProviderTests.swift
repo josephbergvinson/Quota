@@ -3,6 +3,89 @@ import XCTest
 @testable import QuotaCore
 
 final class ChatGPTUsageProviderTests: XCTestCase {
+    func testBankedResetCreditsUseAuthoritativeCountAndPreserveExpiryDetails() throws {
+        let grantedAt = Date(timeIntervalSince1970: 1_788_004_800)
+        let firstExpiry = Date(timeIntervalSince1970: 1_788_872_400)
+        let resetCredits = ChatGPTRateLimitResetCreditsDTO(
+            availableCount: 3,
+            credits: [
+                ChatGPTRateLimitResetCreditDTO(
+                    id: "reset_1",
+                    resetType: "codexRateLimits",
+                    status: "available",
+                    grantedAt: grantedAt,
+                    expiresAt: firstExpiry,
+                    title: "Full reset",
+                    detail: "Resets eligible Codex windows."
+                ),
+                ChatGPTRateLimitResetCreditDTO(
+                    id: "reset_2",
+                    resetType: "codexRateLimits",
+                    status: "available",
+                    grantedAt: grantedAt,
+                    expiresAt: nil,
+                    title: nil,
+                    detail: nil
+                )
+            ]
+        )
+
+        let metric = try makeProvider().makeBankedResetCredits(from: resetCredits)
+        let credits = try XCTUnwrap(metric.value)
+
+        XCTAssertEqual(credits.availableCount, 3)
+        XCTAssertEqual(credits.credits?.map(\.status), [.available, .available])
+        XCTAssertEqual(credits.credits?.first?.expiresAt, firstExpiry)
+        XCTAssertNil(credits.credits?.last?.expiresAt)
+    }
+
+    func testBankedResetCreditsDistinguishCountOnlyZeroAndUnavailable() throws {
+        let provider = makeProvider()
+
+        let countOnly = try XCTUnwrap(
+            provider.makeBankedResetCredits(
+                from: ChatGPTRateLimitResetCreditsDTO(availableCount: 2, credits: nil)
+            ).value
+        )
+        XCTAssertEqual(countOnly.availableCount, 2)
+        XCTAssertNil(countOnly.credits)
+
+        let zero = try XCTUnwrap(
+            provider.makeBankedResetCredits(
+                from: ChatGPTRateLimitResetCreditsDTO(availableCount: 0, credits: [])
+            ).value
+        )
+        XCTAssertEqual(zero.availableCount, 0)
+        XCTAssertEqual(zero.credits, [])
+
+        let unavailable = try provider.makeBankedResetCredits(from: nil)
+        XCTAssertNil(unavailable.value)
+        XCTAssertEqual(unavailable.unavailability?.reason, .notReturned)
+    }
+
+    func testUnknownBankedResetStatusRemainsExplicit() throws {
+        let resetCredits = ChatGPTRateLimitResetCreditsDTO(
+            availableCount: 1,
+            credits: [
+                ChatGPTRateLimitResetCreditDTO(
+                    id: "reset_1",
+                    resetType: "codexRateLimits",
+                    status: "future-provider-state",
+                    grantedAt: Date(timeIntervalSince1970: 1_788_004_800),
+                    expiresAt: Date(timeIntervalSince1970: 1_788_872_400),
+                    title: nil,
+                    detail: nil
+                )
+            ]
+        )
+
+        let credits = try XCTUnwrap(
+            makeProvider().makeBankedResetCredits(from: resetCredits).value
+        )
+
+        XCTAssertEqual(credits.credits?.first?.status, .unknown)
+    }
+
     func testQuotaWindowsKeepOnlyTheRegularCodexWeeklyBucket() throws {
         let reset = Date(timeIntervalSince1970: 1_788_264_000)
         let limits = ChatGPTRateLimitsDTO(

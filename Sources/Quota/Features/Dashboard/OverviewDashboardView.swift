@@ -303,6 +303,22 @@ private struct AccountCapacityCard: View {
 
                 CapacityBar(capacity: capacity)
 
+                if let bankedResetCredits, bankedResetCredits.availableCount > 0 {
+                    Label(
+                        bankedResetDescription(bankedResetCredits),
+                        systemImage: bankedResetHasPassedExpiry(bankedResetCredits)
+                            ? "clock.badge.exclamationmark"
+                            : "arrow.counterclockwise.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(
+                        bankedResetHasPassedExpiry(bankedResetCredits)
+                            ? Color.orange
+                            : Color.secondary
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
                 HStack {
                     if let reset = capacity.nextResetAt {
                         Label(
@@ -344,5 +360,57 @@ private struct AccountCapacityCard: View {
                 .stroke(.quaternary, lineWidth: 1)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var bankedResetCredits: BankedResetCredits? {
+        model.latestSnapshots[capacity.account.id]?.bankedResetCredits.value
+    }
+
+    private var didRefreshFail: Bool {
+        if case .failed = model.refreshStates[capacity.account.id] {
+            return true
+        }
+        return false
+    }
+
+    private func reportedExpiryCredits(_ credits: BankedResetCredits) -> [BankedResetCredit] {
+        (credits.credits ?? [])
+            .filter {
+                ($0.status == .available || $0.status == .unknown)
+                    && $0.expiresAt != nil
+            }
+            .sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    }
+
+    private func bankedResetHasPassedExpiry(_ credits: BankedResetCredits) -> Bool {
+        reportedExpiryCredits(credits).contains { ($0.expiresAt ?? .distantFuture) <= model.now }
+    }
+
+    private func bankedResetDescription(_ credits: BankedResetCredits) -> String {
+        let countDescription = credits.availableCount == 1
+            ? "1 banked reset"
+            : "\(credits.availableCount) banked resets"
+        let usesLastReportedLanguage = capacity.isStale
+            || didRefreshFail
+            || bankedResetHasPassedExpiry(credits)
+        let availabilityDescription = usesLastReportedLanguage
+            ? "Last reported: \(countDescription)"
+            : countDescription
+
+        guard
+            let earliestCredit = reportedExpiryCredits(credits).first,
+            let earliestExpiry = earliestCredit.expiresAt
+        else {
+            return availabilityDescription
+        }
+
+        let formattedExpiry = earliestExpiry.formatted(date: .abbreviated, time: .shortened)
+        if earliestExpiry <= model.now {
+            return "\(availabilityDescription) · reported expiry passed \(formattedExpiry)"
+        }
+        let expiryLabel = usesLastReportedLanguage || earliestCredit.status == .unknown
+            ? "reported expiry"
+            : "earliest expiry"
+        return "\(availabilityDescription) · \(expiryLabel) \(formattedExpiry)"
     }
 }

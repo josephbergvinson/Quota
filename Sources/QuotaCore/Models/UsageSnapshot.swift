@@ -189,6 +189,49 @@ public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum BankedResetCreditStatus: String, Codable, Equatable, Sendable {
+    case available
+    case redeeming
+    case redeemed
+    case unknown
+}
+
+public struct BankedResetCredit: Codable, Equatable, Sendable {
+    public let status: BankedResetCreditStatus
+    public let expiresAt: Date?
+
+    public init(status: BankedResetCreditStatus, expiresAt: Date?) throws {
+        if let expiresAt, !expiresAt.timeIntervalSinceReferenceDate.isFinite {
+            throw DomainValidationError.invalidBankedResetCredits
+        }
+        self.status = status
+        self.expiresAt = expiresAt
+    }
+
+    public func validated() throws -> BankedResetCredit {
+        try BankedResetCredit(status: status, expiresAt: expiresAt)
+    }
+}
+
+public struct BankedResetCredits: Codable, Equatable, Sendable {
+    /// The provider's authoritative available count. Detail rows may be capped.
+    public let availableCount: Int
+    /// `nil` means the provider returned only the count.
+    public let credits: [BankedResetCredit]?
+
+    public init(availableCount: Int, credits: [BankedResetCredit]?) throws {
+        guard availableCount >= 0 else {
+            throw DomainValidationError.invalidBankedResetCredits
+        }
+        self.availableCount = availableCount
+        self.credits = try credits?.map { try $0.validated() }
+    }
+
+    public func validated() throws -> BankedResetCredits {
+        try BankedResetCredits(availableCount: availableCount, credits: credits)
+    }
+}
+
 public enum UsageSource: String, Codable, Sendable {
     case manual
     case chatGPTAppServer
@@ -204,6 +247,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let allowance: Metric<Allowance>
     public let quotaWindows: Metric<[QuotaWindow]>
     public let resetAt: Metric<Date>
+    public let bankedResetCredits: Metric<BankedResetCredits>
     public let totalTokens: Metric<Int>
     public let inputTokens: Metric<Int>
     public let cachedInputTokens: Metric<Int>
@@ -222,6 +266,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
         allowance: Metric<Allowance>,
         quotaWindows: Metric<[QuotaWindow]>,
         resetAt: Metric<Date>,
+        bankedResetCredits: Metric<BankedResetCredits>? = nil,
         totalTokens: Metric<Int>,
         inputTokens: Metric<Int>,
         cachedInputTokens: Metric<Int>,
@@ -239,6 +284,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
         self.allowance = allowance
         self.quotaWindows = quotaWindows
         self.resetAt = resetAt
+        self.bankedResetCredits = bankedResetCredits ?? Self.missingBankedResetCredits
         self.totalTokens = totalTokens
         self.inputTokens = inputTokens
         self.cachedInputTokens = cachedInputTokens
@@ -258,6 +304,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
             allowance: .unavailable(.awaitingFirstRefresh),
             quotaWindows: .unavailable(.awaitingFirstRefresh),
             resetAt: .unavailable(.awaitingFirstRefresh),
+            bankedResetCredits: .unavailable(.awaitingFirstRefresh),
             totalTokens: .unavailable(.awaitingFirstRefresh),
             inputTokens: .unavailable(.awaitingFirstRefresh),
             cachedInputTokens: .unavailable(.awaitingFirstRefresh),
@@ -289,6 +336,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
             allowance: allowance.map(Metric.available) ?? .unavailable(.notEntered),
             quotaWindows: quotaWindows.isEmpty ? .unavailable(.notEntered) : .available(quotaWindows),
             resetAt: resetAt.map(Metric.available) ?? .unavailable(.notEntered),
+            bankedResetCredits: .unavailable(providerMetric),
             totalTokens: .unavailable(providerMetric),
             inputTokens: .unavailable(providerMetric),
             cachedInputTokens: .unavailable(providerMetric),
@@ -297,6 +345,59 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
             costUSD: .unavailable(providerMetric),
             modelUsage: .unavailable(providerMetric),
             dailyUsage: .unavailable(providerMetric)
+        )
+    }
+
+    private static let missingBankedResetCredits = Metric<BankedResetCredits>.unavailable(
+        UnavailableMetric(
+            reason: .notReturned,
+            detail: "Banked reset data was not captured for this reading. Refresh the account to check again."
+        )
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case accountID
+        case capturedAt
+        case source
+        case reportingPeriod
+        case allowance
+        case quotaWindows
+        case resetAt
+        case bankedResetCredits
+        case totalTokens
+        case inputTokens
+        case cachedInputTokens
+        case outputTokens
+        case requests
+        case costUSD
+        case modelUsage
+        case dailyUsage
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            accountID: try container.decode(UUID.self, forKey: .accountID),
+            capturedAt: try container.decode(Date.self, forKey: .capturedAt),
+            source: try container.decode(UsageSource.self, forKey: .source),
+            reportingPeriod: try container.decodeIfPresent(ReportingPeriod.self, forKey: .reportingPeriod),
+            allowance: try container.decode(Metric<Allowance>.self, forKey: .allowance),
+            quotaWindows: try container.decode(Metric<[QuotaWindow]>.self, forKey: .quotaWindows),
+            resetAt: try container.decode(Metric<Date>.self, forKey: .resetAt),
+            bankedResetCredits: try container.decodeIfPresent(
+                Metric<BankedResetCredits>.self,
+                forKey: .bankedResetCredits
+            ),
+            totalTokens: try container.decode(Metric<Int>.self, forKey: .totalTokens),
+            inputTokens: try container.decode(Metric<Int>.self, forKey: .inputTokens),
+            cachedInputTokens: try container.decode(Metric<Int>.self, forKey: .cachedInputTokens),
+            outputTokens: try container.decode(Metric<Int>.self, forKey: .outputTokens),
+            requests: try container.decode(Metric<Int>.self, forKey: .requests),
+            costUSD: try container.decode(Metric<Double>.self, forKey: .costUSD),
+            modelUsage: try container.decode(Metric<[ModelUsage]>.self, forKey: .modelUsage),
+            dailyUsage: try container.decode(Metric<[DailyUsagePoint]>.self, forKey: .dailyUsage)
         )
     }
 }
