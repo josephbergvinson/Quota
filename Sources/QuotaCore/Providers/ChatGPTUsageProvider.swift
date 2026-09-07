@@ -1,7 +1,7 @@
 import Foundation
 
 public struct ChatGPTUsageProvider: UsageProvider {
-    private static let uninitializedResetTolerance: TimeInterval = 5
+    private static let unstartedResetTolerance: TimeInterval = 5
 
     public let dataSourceKind: UsageDataSourceKind = .chatGPTAppServer
     public let accountsDirectoryURL: URL
@@ -203,14 +203,14 @@ public struct ChatGPTUsageProvider: UsageProvider {
                    limitID: limitID,
                    limitName: limitName,
                    accountKind: accountKind
-               ),
-               !isClearlyUninitialized(primary, capturedAt: capturedAt) {
+               ) {
                 windows.append(
                     try makeQuotaWindow(
                         value: primary,
                         identifier: "\(limitID):primary",
                         limitName: limitName,
-                        fallbackRole: "Primary"
+                        fallbackRole: "Primary",
+                        capturedAt: capturedAt
                     )
                 )
             }
@@ -221,14 +221,14 @@ public struct ChatGPTUsageProvider: UsageProvider {
                    limitID: limitID,
                    limitName: limitName,
                    accountKind: accountKind
-               ),
-               !isClearlyUninitialized(secondary, capturedAt: capturedAt) {
+               ) {
                 windows.append(
                     try makeQuotaWindow(
                         value: secondary,
                         identifier: "\(limitID):secondary",
                         limitName: limitName,
-                        fallbackRole: "Secondary"
+                        fallbackRole: "Secondary",
+                        capturedAt: capturedAt
                     )
                 )
             }
@@ -279,9 +279,10 @@ public struct ChatGPTUsageProvider: UsageProvider {
         )
     }
 
-    /// Codex can return an unused bucket with a reset anchored to the instant it was read. Such a
-    /// reset slides forward on every refresh and does not represent a scheduled provider reset.
-    private func isClearlyUninitialized(
+    /// Before an account starts using a window, Codex anchors its reset one full duration after
+    /// every read. The 0%-used capacity is real, but that sliding timestamp is not a scheduled
+    /// reset and must not become a planner event.
+    private func hasUnstartedSlidingReset(
         _ value: ChatGPTRateLimitWindowDTO,
         capturedAt: Date
     ) -> Bool {
@@ -297,14 +298,15 @@ public struct ChatGPTUsageProvider: UsageProvider {
         let durationSeconds = Double(durationMinutes) * 60
         let resetOffset = resetsAt.timeIntervalSince(capturedAt)
         guard durationSeconds.isFinite, resetOffset.isFinite else { return false }
-        return abs(resetOffset - durationSeconds) <= Self.uninitializedResetTolerance
+        return abs(resetOffset - durationSeconds) <= Self.unstartedResetTolerance
     }
 
     private func makeQuotaWindow(
         value: ChatGPTRateLimitWindowDTO,
         identifier: String,
         limitName: String,
-        fallbackRole: String
+        fallbackRole: String,
+        capturedAt: Date
     ) throws -> QuotaWindow {
         guard (0...100).contains(value.usedPercent) else {
             throw ProviderError.invalidResponse
@@ -315,7 +317,9 @@ public struct ChatGPTUsageProvider: UsageProvider {
             identifier: identifier,
             name: "\(limitName) · \(role)",
             usedPercent: Double(value.usedPercent),
-            resetsAt: value.resetsAt,
+            resetsAt: hasUnstartedSlidingReset(value, capturedAt: capturedAt)
+                ? nil
+                : value.resetsAt,
             durationMinutes: duration
         )
     }

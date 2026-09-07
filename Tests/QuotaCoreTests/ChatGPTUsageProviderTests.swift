@@ -308,7 +308,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         }
     }
 
-    func testSlidingUnusedWindowIsExcluded() throws {
+    func testFreshUnusedWindowRetainsCapacityWithoutSyntheticReset() async throws {
         let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(
@@ -324,13 +324,78 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             resetCredits: nil
         )
 
-        let windows = try makeProvider().makeQuotaWindows(
-            from: limits,
-            capturedAt: capturedAt,
-            accountKind: .chatGPTPro
+        let result = try await fetchResult(
+            email: "pro@example.com",
+            reportedPlan: "pro",
+            localKind: .chatGPTPro,
+            rateLimits: limits
+        )
+        let windows = try XCTUnwrap(result.snapshot.quotaWindows.value)
+
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(windows.first?.usedPercent, 0)
+        XCTAssertEqual(windows.first?.remainingPercent, 100)
+        XCTAssertNil(windows.first?.resetsAt)
+        XCTAssertNil(result.snapshot.resetAt.value)
+        XCTAssertEqual(result.snapshot.resetAt.unavailability?.reason, .notReturned)
+
+        let account = try makeAccount(
+            id: result.snapshot.accountID,
+            kind: .chatGPTPro
+        )
+        let capacity = UsageAnalytics.capacity(
+            for: account,
+            snapshot: result.snapshot,
+            now: capturedAt
+        )
+        XCTAssertEqual(capacity.remainingFraction, 1)
+        XCTAssertNil(capacity.nextResetAt)
+        XCTAssertTrue(
+            UsageAnalytics.resetEvents(
+                accounts: [account],
+                snapshots: [result.snapshot],
+                in: DateInterval(
+                    start: capturedAt,
+                    end: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
+                )
+            ).isEmpty
+        )
+    }
+
+    func testFreshUnusedPlusWindowsRetainCapacityWithoutSyntheticResets() async throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
+        let limits = ChatGPTRateLimitsDTO(
+            rateLimits: makeSnapshot(),
+            rateLimitsByLimitID: [
+                "codex": makeSnapshot(
+                    limitID: "codex",
+                    limitName: "Codex",
+                    primary: makeWindow(
+                        usedPercent: 0,
+                        durationMinutes: 300,
+                        resetsAt: capturedAt.addingTimeInterval(300 * 60)
+                    ),
+                    secondary: makeWindow(
+                        usedPercent: 0,
+                        durationMinutes: 10_080,
+                        resetsAt: capturedAt.addingTimeInterval(10_080 * 60)
+                    )
+                )
+            ],
+            resetCredits: nil
         )
 
-        XCTAssertTrue(windows.isEmpty)
+        let result = try await fetchResult(
+            email: "plus@example.com",
+            reportedPlan: "plus",
+            localKind: .chatGPTPlus,
+            rateLimits: limits
+        )
+        let windows = try XCTUnwrap(result.snapshot.quotaWindows.value)
+
+        XCTAssertEqual(windows.map(\.remainingPercent), [100, 100])
+        XCTAssertEqual(windows.compactMap(\.durationMinutes).sorted(), [300, 10_080])
+        XCTAssertTrue(windows.allSatisfy { $0.resetsAt == nil })
     }
 
     func testStableUnusedWindowIsRetained() throws {
@@ -388,10 +453,10 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.first?.resetsAt, reset)
     }
 
-    func testActualResetWinsAfterSlidingPlaceholderIsExcluded() throws {
+    func testActualResetWinsWhenUnrelatedBucketIsExcluded() throws {
         let capturedAt = Date(timeIntervalSince1970: 1_788_264_000)
         let actualReset = capturedAt.addingTimeInterval(2 * 24 * 60 * 60)
-        let placeholderReset = capturedAt.addingTimeInterval(300 * 60)
+        let unrelatedReset = capturedAt.addingTimeInterval(300 * 60)
         let limits = ChatGPTRateLimitsDTO(
             rateLimits: makeSnapshot(),
             rateLimitsByLimitID: [
@@ -408,7 +473,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
                     primary: makeWindow(
                         usedPercent: 0,
                         durationMinutes: 300,
-                        resetsAt: placeholderReset
+                        resetsAt: unrelatedReset
                     )
                 )
             ],

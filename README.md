@@ -119,7 +119,7 @@ Banked-reset expiries stay on the Overview and account detail views. They are no
 
 If a future reset is changed or removed by a newer reading before it occurs, the planner drops the superseded event. Completed resets remain in local history.
 
-Codex can report unused placeholder windows whose reset time moves on every refresh. Quota omits those placeholders from capacity and calendar views while retaining real unused and active windows.
+Codex can report a real unused capacity window with a provisional reset time that moves on every refresh. Quota retains the reported 100% capacity but suppresses that provisional reset from account and calendar views; stable provider-reported reset times remain visible.
 
 Quota shows the regular Codex one-week window for ChatGPT Pro. For ChatGPT Plus, it also shows the regular five-hour window when Codex reports it. GPT-5.3-Codex-Spark and unrelated buckets remain outside regular account rotation planning.
 
