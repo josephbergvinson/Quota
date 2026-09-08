@@ -2,7 +2,65 @@ import Charts
 import QuotaCore
 import SwiftUI
 
+enum UsageHistoryRange: String, CaseIterable, Identifiable {
+    case sevenDays
+    case thirtyDays
+    case all
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .sevenDays: "7D"
+        case .thirtyDays: "30D"
+        case .all: "All"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .sevenDays: "Last 7 days"
+        case .thirtyDays: "Last 30 days"
+        case .all: "All reported history"
+        }
+    }
+
+    var dayCount: Int? {
+        switch self {
+        case .sevenDays: 7
+        case .thirtyDays: 30
+        case .all: nil
+        }
+    }
+}
+
+struct UsageHistoryRangePicker: View {
+    @Binding var selection: UsageHistoryRange
+    var accessibilityLabel = "Analytics range"
+
+    var body: some View {
+        Picker("Analytics range", selection: $selection) {
+            ForEach(UsageHistoryRange.allCases) { range in
+                Text(range.label).tag(range)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 190)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
 struct UsageHistoryChart: View {
+    private static let maximumXAxisLabelCount = 6
+    private static let utcTimeZone = TimeZone(secondsFromGMT: 0)!
+    private static let utcCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utcTimeZone
+        return calendar
+    }()
+
     enum Metric: String, CaseIterable, Identifiable {
         case tokens = "Tokens"
         case cost = "Cost"
@@ -18,7 +76,9 @@ struct UsageHistoryChart: View {
     }
 
     let points: [DailyUsagePoint]
+    let dateInterval: DateInterval
     var tint: Color = .accentColor
+    var rangeSelection: Binding<UsageHistoryRange>?
     var costIsComplete = true
     var costQualification: String?
     @State private var metric: Metric = .tokens
@@ -55,133 +115,40 @@ struct UsageHistoryChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Usage over time")
-                        .font(.headline)
-                    Text(chartDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(spacing: 8) {
-                    if supportsCost {
-                        Picker("History metric", selection: $metric) {
-                            ForEach(Metric.allCases) { metric in
-                                Text(metric.rawValue).tag(metric)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 140)
-                        .accessibilityLabel("History metric")
-                    }
-
-                    Picker("Chart style", selection: $presentation) {
-                        ForEach(Presentation.allCases) { presentation in
-                            Text(presentation.rawValue).tag(presentation)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 190)
-                    .accessibilityLabel("Chart style")
-                }
-            }
-
-            Chart {
-                if effectiveMetric == .tokens, presentation == .daily, hasTokenBreakdown {
-                    ForEach(tokenSeries) { point in
-                        BarMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Tokens", point.tokens)
-                        )
-                        .foregroundStyle(by: .value("Token type", point.category.rawValue))
-                        .cornerRadius(2)
-                    }
-                } else if effectiveMetric == .tokens, presentation == .daily {
-                    ForEach(points) { point in
-                        BarMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Total tokens", point.totalTokens)
-                        )
-                        .foregroundStyle(tint)
-                        .cornerRadius(2)
-                    }
-                } else if effectiveMetric == .tokens {
-                    ForEach(chartPoints) { point in
-                        AreaMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Cumulative tokens", point.totalTokens)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [tint.opacity(0.28), tint.opacity(0.02)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        LineMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Cumulative tokens", point.totalTokens)
-                        )
-                        .foregroundStyle(tint)
-                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    }
+            if let rangeSelection {
+                chartTitle
+                if points.isEmpty {
+                    UsageHistoryRangePicker(
+                        selection: rangeSelection,
+                        accessibilityLabel: "Usage history range"
+                    )
                 } else {
-                    ForEach(chartPoints) { point in
-                        AreaMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Cost", point.costUSD)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [tint.opacity(0.28), tint.opacity(0.02)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        LineMark(
-                            x: .value("Day", point.date, unit: .day),
-                            y: .value("Cost", point.costUSD)
-                        )
-                        .foregroundStyle(tint)
-                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    rangeAndChartControls(rangeSelection: rangeSelection)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top) {
+                        chartTitle
+                        Spacer(minLength: 12)
+                        chartControls
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        chartTitle
+                        chartControls
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
             }
-            .chartForegroundStyleScale(
-                domain: activeTokenCategories.map(\.rawValue),
-                range: activeTokenCategories.map(tokenColor)
-            )
-            .chartLegend(
-                effectiveMetric == .tokens
-                    && presentation == .daily
-                    && hasTokenBreakdown
-                    && activeTokenCategories.count > 1
-                    ? .visible
-                    : .hidden
-            )
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine()
-                    AxisValueLabel {
-                        if effectiveMetric == .cost, let amount = value.as(Double.self) {
-                            Text(amount, format: .currency(code: "USD").precision(.fractionLength(0...2)))
-                        } else if let count = value.as(Int.self) {
-                            Text(QuotaFormat.compactNumber(count))
-                        }
-                    }
-                }
+
+            if points.isEmpty {
+                ContentUnavailableView(
+                    emptyRangeTitle,
+                    systemImage: "chart.xyaxis.line"
+                )
+                .frame(height: 210)
+            } else {
+                usageChart
             }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .day, count: max(1, chartPoints.count / 6))) {
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                }
-            }
-            .frame(height: 210)
-            .accessibilityLabel(chartAccessibilityLabel)
         }
         .onChange(of: supportsCost) { _, supportsCost in
             if !supportsCost {
@@ -193,6 +160,238 @@ struct UsageHistoryChart: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(.quaternary, lineWidth: 1)
+        }
+    }
+
+    private func rangeAndChartControls(
+        rangeSelection: Binding<UsageHistoryRange>
+    ) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                UsageHistoryRangePicker(
+                    selection: rangeSelection,
+                    accessibilityLabel: "Usage history range"
+                )
+                Spacer(minLength: 12)
+                chartControls
+            }
+            VStack(alignment: .trailing, spacing: 8) {
+                UsageHistoryRangePicker(
+                    selection: rangeSelection,
+                    accessibilityLabel: "Usage history range"
+                )
+                chartControls
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private var chartTitle: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Usage over time")
+                .font(.headline)
+            Text(chartDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var chartControls: some View {
+        HStack(spacing: 8) {
+            if supportsCost {
+                Picker("History metric", selection: $metric) {
+                    ForEach(Metric.allCases) { metric in
+                        Text(metric.rawValue).tag(metric)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 140)
+                .accessibilityLabel("History metric")
+            }
+
+            Picker("Chart style", selection: $presentation) {
+                ForEach(Presentation.allCases) { presentation in
+                    Text(presentation.rawValue).tag(presentation)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 190)
+            .accessibilityLabel("Chart style")
+        }
+    }
+
+    private var usageChart: some View {
+        Chart {
+            if effectiveMetric == .tokens, presentation == .daily, hasTokenBreakdown {
+                ForEach(tokenSeries) { point in
+                    BarMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Tokens", point.tokens)
+                    )
+                    .foregroundStyle(by: .value("Token type", point.category.rawValue))
+                    .cornerRadius(2)
+                }
+            } else if effectiveMetric == .tokens, presentation == .daily {
+                ForEach(points) { point in
+                    BarMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Total tokens", point.totalTokens)
+                    )
+                    .foregroundStyle(tint)
+                    .cornerRadius(2)
+                }
+            } else if effectiveMetric == .tokens {
+                ForEach(chartPoints) { point in
+                    AreaMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Cumulative tokens", point.totalTokens)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [tint.opacity(0.28), tint.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    LineMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Cumulative tokens", point.totalTokens)
+                    )
+                    .foregroundStyle(tint)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                }
+            } else {
+                ForEach(chartPoints) { point in
+                    AreaMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Cost", point.costUSD)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [tint.opacity(0.28), tint.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    LineMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Cost", point.costUSD)
+                    )
+                    .foregroundStyle(tint)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                }
+            }
+        }
+        .chartForegroundStyleScale(
+            domain: activeTokenCategories.map(\.rawValue),
+            range: activeTokenCategories.map(tokenColor)
+        )
+        .chartLegend(
+            effectiveMetric == .tokens
+                && presentation == .daily
+                && hasTokenBreakdown
+                && activeTokenCategories.count > 1
+                ? .visible
+                : .hidden
+        )
+        .chartYAxis {
+            AxisMarks(position: .leading) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if effectiveMetric == .cost, let amount = value.as(Double.self) {
+                        Text(amount, format: .currency(code: "USD").precision(.fractionLength(0...2)))
+                    } else if let count = value.as(Int.self) {
+                        Text(QuotaFormat.compactNumber(count))
+                    }
+                }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(
+                values: .stride(
+                    by: .day,
+                    count: xAxisDayStride,
+                    roundLowerBound: false,
+                    roundUpperBound: false,
+                    calendar: Self.utcCalendar
+                )
+            ) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                AxisValueLabel(
+                    collisionResolution: .greedy(minimumSpacing: 8)
+                ) {
+                    if let date = value.as(Date.self) {
+                        Text(date, format: xAxisDateFormat)
+                    }
+                }
+            }
+        }
+        .chartXScale(
+            domain: chartDomain,
+            range: .plotDimension(startPadding: 24, endPadding: 24)
+        )
+        .environment(\.calendar, Self.utcCalendar)
+        .environment(\.timeZone, Self.utcTimeZone)
+        .frame(height: 210)
+        .accessibilityLabel(chartAccessibilityLabel)
+    }
+
+    private var chartDomain: ClosedRange<Date> {
+        let upperBound = max(dateInterval.start, dateInterval.end.addingTimeInterval(-1))
+        return dateInterval.start...upperBound
+    }
+
+    private var xAxisDayStride: Int {
+        let start = Self.utcCalendar.startOfDay(for: dateInterval.start)
+        let end = Self.utcCalendar.startOfDay(for: dateInterval.end)
+        let dayCount = max(
+            1,
+            Self.utcCalendar.dateComponents([.day], from: start, to: end).day ?? 1
+        )
+        return max(
+            1,
+            Int(ceil(Double(dayCount) / Double(Self.maximumXAxisLabelCount)))
+        )
+    }
+
+    private var xAxisDateFormat: Date.FormatStyle {
+        var style = Date.FormatStyle(
+            locale: .autoupdatingCurrent,
+            calendar: Self.utcCalendar,
+            timeZone: Self.utcTimeZone
+        )
+        .month(.abbreviated)
+        .day()
+        if crossesCalendarYear {
+            style = style.year(.twoDigits)
+        }
+        return style
+    }
+
+    private var crossesCalendarYear: Bool {
+        let lastDisplayedDay = max(
+            dateInterval.start,
+            dateInterval.end.addingTimeInterval(-1)
+        )
+        return Self.utcCalendar.component(.year, from: dateInterval.start)
+            != Self.utcCalendar.component(.year, from: lastDisplayedDay)
+    }
+
+    private var emptyRangeTitle: String {
+        guard let range = rangeSelection?.wrappedValue else {
+            return "No usage reported in this period"
+        }
+        return switch range {
+        case .sevenDays:
+            "No usage reported in the last 7 days"
+        case .thirtyDays:
+            "No usage reported in the last 30 days"
+        case .all:
+            "No usage reported in retained history"
         }
     }
 
@@ -257,6 +456,12 @@ struct UsageHistoryChart: View {
     }
 
     private var chartAccessibilityLabel: String {
-        "\(presentation.rawValue) \(effectiveMetric.rawValue.lowercased()) usage chart"
+        let rangeDescription: String
+        if let range = rangeSelection?.wrappedValue {
+            rangeDescription = " for \(range.description.lowercased())"
+        } else {
+            rangeDescription = ""
+        }
+        return "\(presentation.rawValue) \(effectiveMetric.rawValue.lowercased()) usage chart\(rangeDescription)"
     }
 }

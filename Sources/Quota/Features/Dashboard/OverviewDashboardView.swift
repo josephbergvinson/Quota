@@ -2,40 +2,8 @@ import QuotaCore
 import SwiftUI
 
 struct OverviewDashboardView: View {
-    private enum DashboardRange: String, CaseIterable, Identifiable {
-        case sevenDays
-        case thirtyDays
-        case all
-
-        var id: String { rawValue }
-
-        var label: String {
-            switch self {
-            case .sevenDays: "7D"
-            case .thirtyDays: "30D"
-            case .all: "All"
-            }
-        }
-
-        var description: String {
-            switch self {
-            case .sevenDays: "Last 7 days"
-            case .thirtyDays: "Last 30 days"
-            case .all: "All reported history"
-            }
-        }
-
-        var dayCount: Int? {
-            switch self {
-            case .sevenDays: 7
-            case .thirtyDays: 30
-            case .all: nil
-            }
-        }
-    }
-
     @EnvironmentObject private var model: AppModel
-    @State private var selectedRange: DashboardRange = .sevenDays
+    @State private var selectedRange: UsageHistoryRange = .sevenDays
 
     var body: some View {
         Group {
@@ -94,6 +62,7 @@ struct OverviewDashboardView: View {
                 if !tokenBreakdown.dailyPoints.isEmpty {
                     UsageHistoryChart(
                         points: tokenBreakdown.dailyPoints,
+                        dateInterval: tokenBreakdown.interval,
                         costIsComplete: tokenBreakdown.accountsReportingDailyUsage > 0
                             && tokenBreakdown.accountsReportingCost
                                 == tokenBreakdown.accountsReportingDailyUsage,
@@ -121,15 +90,7 @@ struct OverviewDashboardView: View {
             Spacer()
             HStack(spacing: 10) {
                 if hasDailyTokenReporting {
-                    Picker("Analytics range", selection: $selectedRange) {
-                        ForEach(DashboardRange.allCases) { range in
-                            Text(range.label).tag(range)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 190)
-                    .accessibilityLabel("Analytics range")
+                    UsageHistoryRangePicker(selection: $selectedRange)
                 }
 
                 if model.isRefreshing {

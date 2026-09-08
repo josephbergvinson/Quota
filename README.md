@@ -83,7 +83,7 @@ ChatGPT telemetry is the supported ChatGPT-backed **Codex** surface. It is not a
 
 When Codex reports earned banked resets, Quota shows the provider's authoritative available count on the account. Credit details can be unavailable or capped, and individual credits may not expire, so Quota labels missing expiry details instead of deriving them from the count.
 
-The Overview uses one common 7-day, 30-day, or all-reported-history range for its headline totals and chart. Total tokens include every account with daily provider data. Cached input, uncached input, and output cards and chart categories appear only when at least one connected provider reports those splits; otherwise the chart is total-only. The usage chart can switch between daily activity and a cumulative running total for the selected range.
+The Overview uses one common 7-day, 30-day, or all-reported-history range for its headline totals and chart. Each account chart offers the same ranges; its all-time view merges that account's locally retained provider history without double-counting overlapping reports. Total tokens include every account with daily provider data. Cached input, uncached input, and output cards and chart categories appear only when at least one connected provider reports those splits; otherwise the chart is total-only. Usage charts can switch between daily activity and a cumulative running total for the selected range.
 
 API organization usage and consumer subscription usage are separate account types. An OpenAI organization key does not reveal a ChatGPT Plus/Pro allowance, and an Anthropic key for a Claude Console organization does not reveal a Claude Pro/Max allowance.
 

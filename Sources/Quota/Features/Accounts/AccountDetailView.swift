@@ -9,6 +9,7 @@ struct AccountDetailView: View {
     @State private var isShowingClaudeCodeFallback = false
     @State private var claudeAuthorizationCode = ""
     @State private var isSubmittingClaudeCode = false
+    @State private var selectedHistoryRange: UsageHistoryRange = .sevenDays
 
     private var snapshot: UsageSnapshot? {
         model.latestSnapshots[account.id]
@@ -351,11 +352,19 @@ struct AccountDetailView: View {
 
     @ViewBuilder
     private var historySection: some View {
-        if let dailyUsage = snapshot?.dailyUsage.value, !dailyUsage.isEmpty {
+        let selectedBreakdown = accountHistoryBreakdown(for: selectedHistoryRange)
+        let allBreakdown = selectedHistoryRange == .all
+            ? selectedBreakdown
+            : accountHistoryBreakdown(for: .all)
+        if !allBreakdown.dailyPoints.isEmpty {
             UsageHistoryChart(
-                points: dailyUsage,
+                points: selectedBreakdown.dailyPoints,
+                dateInterval: selectedBreakdown.interval,
                 tint: account.kind.provider.tintColor,
-                costIsComplete: snapshot?.costUSD.value != nil,
+                rangeSelection: $selectedHistoryRange,
+                costIsComplete: selectedBreakdown.accountsReportingDailyUsage > 0
+                    && selectedBreakdown.accountsReportingCost
+                        == selectedBreakdown.accountsReportingDailyUsage,
                 costQualification: account.kind == .anthropicAPI
                     ? "excludes Priority Tier"
                     : nil
@@ -383,6 +392,17 @@ struct AccountDetailView: View {
                     .stroke(.quaternary, lineWidth: 1)
             }
         }
+    }
+
+    private func accountHistoryBreakdown(
+        for range: UsageHistoryRange
+    ) -> DashboardTokenBreakdown {
+        UsageAnalytics.tokenBreakdown(
+            accounts: [account],
+            snapshots: model.state.snapshots,
+            now: model.now,
+            dayCount: range.dayCount
+        )
     }
 
     @ViewBuilder
