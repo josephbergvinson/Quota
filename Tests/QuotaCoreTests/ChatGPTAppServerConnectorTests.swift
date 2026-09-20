@@ -467,6 +467,12 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
         let telemetry = try await connector.readTelemetry(capturedAt: capturedAt)
 
         XCTAssertEqual(telemetry.capturedAt, capturedAt)
+        XCTAssertNotNil(telemetry.rateLimitsReadStartedAt)
+        XCTAssertNotNil(telemetry.rateLimitsReadFinishedAt)
+        XCTAssertLessThanOrEqual(
+            try XCTUnwrap(telemetry.rateLimitsReadStartedAt),
+            try XCTUnwrap(telemetry.rateLimitsReadFinishedAt)
+        )
         XCTAssertEqual(telemetry.account.account, .chatGPT(email: "fixture@example.com", planType: "pro"))
         XCTAssertEqual(telemetry.rateLimits.rateLimits.primary?.usedPercent, 61)
         XCTAssertEqual(telemetry.tokenUsage.summary.lifetimeTokens, 4_200)

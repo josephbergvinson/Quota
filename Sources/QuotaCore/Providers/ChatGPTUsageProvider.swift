@@ -52,7 +52,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
         }
         let quotaWindows = try makeQuotaWindows(
             from: telemetry.rateLimits,
-            capturedAt: telemetry.capturedAt,
+            capturedAt: telemetry.rateLimitsReadStartedAt ?? telemetry.capturedAt,
+            readFinishedAt: telemetry.rateLimitsReadFinishedAt,
             accountKind: resolvedAccountKind
         )
         let bankedResetCredits = try makeBankedResetCredits(
@@ -71,10 +72,15 @@ public struct ChatGPTUsageProvider: UsageProvider {
         if let nextReset = quotaWindows.compactMap(\.resetsAt).filter({ $0 > now }).min() {
             resetMetric = .available(nextReset)
         } else {
+            let hasWindowStartingOnFirstUse = quotaWindows.contains {
+                $0.activation == .startsOnFirstUse
+            }
             resetMetric = .unavailable(
                 UnavailableMetric(
                     reason: .notReturned,
-                    detail: "Codex did not return a future reset time."
+                    detail: hasWindowStartingOnFirstUse
+                        ? "The quota window has not started yet. Codex will set its reset time after first use."
+                        : "Codex did not return a future reset time."
                 )
             )
         }
@@ -182,6 +188,7 @@ public struct ChatGPTUsageProvider: UsageProvider {
     func makeQuotaWindows(
         from limits: ChatGPTRateLimitsDTO,
         capturedAt: Date,
+        readFinishedAt: Date? = nil,
         accountKind: AccountKind
     ) throws -> [QuotaWindow] {
         let buckets: [(String, ChatGPTRateLimitSnapshotDTO)]
@@ -210,7 +217,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
                         identifier: "\(limitID):primary",
                         limitName: limitName,
                         fallbackRole: "Primary",
-                        capturedAt: capturedAt
+                        capturedAt: capturedAt,
+                        readFinishedAt: readFinishedAt
                     )
                 )
             }
@@ -228,7 +236,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
                         identifier: "\(limitID):secondary",
                         limitName: limitName,
                         fallbackRole: "Secondary",
-                        capturedAt: capturedAt
+                        capturedAt: capturedAt,
+                        readFinishedAt: readFinishedAt
                     )
                 )
             }
@@ -284,7 +293,8 @@ public struct ChatGPTUsageProvider: UsageProvider {
     /// reset and must not become a planner event.
     private func hasUnstartedSlidingReset(
         _ value: ChatGPTRateLimitWindowDTO,
-        capturedAt: Date
+        capturedAt: Date,
+        readFinishedAt: Date?
     ) -> Bool {
         guard
             value.usedPercent == 0,
@@ -296,9 +306,21 @@ public struct ChatGPTUsageProvider: UsageProvider {
         }
 
         let durationSeconds = Double(durationMinutes) * 60
-        let resetOffset = resetsAt.timeIntervalSince(capturedAt)
-        guard durationSeconds.isFinite, resetOffset.isFinite else { return false }
-        return abs(resetOffset - durationSeconds) <= Self.unstartedResetTolerance
+        let resetAnchor = resetsAt.addingTimeInterval(-durationSeconds)
+        let observationEnd = readFinishedAt ?? capturedAt
+        let lowerBound = min(capturedAt, observationEnd)
+            .addingTimeInterval(-Self.unstartedResetTolerance)
+        let upperBound = max(capturedAt, observationEnd)
+            .addingTimeInterval(Self.unstartedResetTolerance)
+        guard
+            durationSeconds.isFinite,
+            resetAnchor.timeIntervalSinceReferenceDate.isFinite,
+            lowerBound.timeIntervalSinceReferenceDate.isFinite,
+            upperBound.timeIntervalSinceReferenceDate.isFinite
+        else {
+            return false
+        }
+        return resetAnchor >= lowerBound && resetAnchor <= upperBound
     }
 
     private func makeQuotaWindow(
@@ -306,21 +328,26 @@ public struct ChatGPTUsageProvider: UsageProvider {
         identifier: String,
         limitName: String,
         fallbackRole: String,
-        capturedAt: Date
+        capturedAt: Date,
+        readFinishedAt: Date?
     ) throws -> QuotaWindow {
         guard (0...100).contains(value.usedPercent) else {
             throw ProviderError.invalidResponse
         }
         let duration = try value.windowDurationMinutes.map(checkedInt)
         let role = duration.map(durationLabel) ?? fallbackRole
+        let startsOnFirstUse = hasUnstartedSlidingReset(
+            value,
+            capturedAt: capturedAt,
+            readFinishedAt: readFinishedAt
+        )
         return try QuotaWindow(
             identifier: identifier,
             name: "\(limitName) · \(role)",
             usedPercent: Double(value.usedPercent),
-            resetsAt: hasUnstartedSlidingReset(value, capturedAt: capturedAt)
-                ? nil
-                : value.resetsAt,
-            durationMinutes: duration
+            resetsAt: startsOnFirstUse ? nil : value.resetsAt,
+            durationMinutes: duration,
+            activation: startsOnFirstUse ? .startsOnFirstUse : nil
         )
     }
 

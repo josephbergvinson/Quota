@@ -284,17 +284,23 @@ public struct ChatGPTTokenUsageDTO: Equatable, Sendable {
 
 public struct ChatGPTTelemetryDTO: Equatable, Sendable {
     public let capturedAt: Date
+    public let rateLimitsReadStartedAt: Date?
+    public let rateLimitsReadFinishedAt: Date?
     public let account: ChatGPTAccountReadDTO
     public let rateLimits: ChatGPTRateLimitsDTO
     public let tokenUsage: ChatGPTTokenUsageDTO
 
     public init(
         capturedAt: Date,
+        rateLimitsReadStartedAt: Date? = nil,
+        rateLimitsReadFinishedAt: Date? = nil,
         account: ChatGPTAccountReadDTO,
         rateLimits: ChatGPTRateLimitsDTO,
         tokenUsage: ChatGPTTokenUsageDTO
     ) {
         self.capturedAt = capturedAt
+        self.rateLimitsReadStartedAt = rateLimitsReadStartedAt
+        self.rateLimitsReadFinishedAt = rateLimitsReadFinishedAt
         self.account = account
         self.rateLimits = rateLimits
         self.tokenUsage = tokenUsage

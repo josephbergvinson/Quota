@@ -336,8 +336,13 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.first?.usedPercent, 0)
         XCTAssertEqual(windows.first?.remainingPercent, 100)
         XCTAssertNil(windows.first?.resetsAt)
+        XCTAssertEqual(windows.first?.activation, .startsOnFirstUse)
         XCTAssertNil(result.snapshot.resetAt.value)
         XCTAssertEqual(result.snapshot.resetAt.unavailability?.reason, .notReturned)
+        XCTAssertEqual(
+            result.snapshot.resetAt.unavailability?.detail,
+            "The quota window has not started yet. Codex will set its reset time after first use."
+        )
 
         let account = try makeAccount(
             id: result.snapshot.accountID,
@@ -360,6 +365,35 @@ final class ChatGPTUsageProviderTests: XCTestCase {
                 )
             ).isEmpty
         )
+    }
+
+    func testSlowTelemetryStillRecognizesWindowStartingOnFirstUse() throws {
+        let readStartedAt = Date(timeIntervalSince1970: 1_788_264_000)
+        let providerReadAt = readStartedAt.addingTimeInterval(12)
+        let readFinishedAt = readStartedAt.addingTimeInterval(18)
+        let limits = ChatGPTRateLimitsDTO(
+            rateLimits: makeSnapshot(
+                limitID: "codex",
+                limitName: "Codex",
+                primary: makeWindow(
+                    usedPercent: 0,
+                    durationMinutes: 10_080,
+                    resetsAt: providerReadAt.addingTimeInterval(10_080 * 60)
+                )
+            ),
+            rateLimitsByLimitID: nil,
+            resetCredits: nil
+        )
+
+        let windows = try makeProvider().makeQuotaWindows(
+            from: limits,
+            capturedAt: readStartedAt,
+            readFinishedAt: readFinishedAt,
+            accountKind: .chatGPTPro
+        )
+
+        XCTAssertEqual(windows.first?.activation, .startsOnFirstUse)
+        XCTAssertNil(windows.first?.resetsAt)
     }
 
     func testFreshUnusedPlusWindowsRetainCapacityWithoutSyntheticResets() async throws {
@@ -396,6 +430,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.map(\.remainingPercent), [100, 100])
         XCTAssertEqual(windows.compactMap(\.durationMinutes).sorted(), [300, 10_080])
         XCTAssertTrue(windows.allSatisfy { $0.resetsAt == nil })
+        XCTAssertTrue(windows.allSatisfy { $0.activation == .startsOnFirstUse })
     }
 
     func testStableUnusedWindowIsRetained() throws {
@@ -423,6 +458,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
 
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows.first?.resetsAt, reset)
+        XCTAssertNil(windows.first?.activation)
     }
 
     func testUsedWindowIsRetainedEvenWhenResetMatchesFullDuration() throws {
@@ -451,6 +487,74 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows.first?.usedPercent, 1)
         XCTAssertEqual(windows.first?.resetsAt, reset)
+        XCTAssertNil(windows.first?.activation)
+    }
+
+    func testStartsOnFirstUseActivationSurvivesValidationAndCodableRoundTrip() throws {
+        let window = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "Codex · 1-week",
+            usedPercent: 0,
+            resetsAt: nil,
+            durationMinutes: 10_080,
+            activation: .startsOnFirstUse
+        )
+
+        XCTAssertEqual(try window.validated().activation, .startsOnFirstUse)
+
+        let data = try JSONEncoder().encode(window)
+        let decoded = try JSONDecoder().decode(QuotaWindow.self, from: data)
+        XCTAssertEqual(decoded, window)
+    }
+
+    func testStartsOnFirstUseActivationRejectsContradictoryWindowState() throws {
+        XCTAssertThrowsError(
+            try QuotaWindow(
+                identifier: "codex:primary",
+                name: "Codex · 1-week",
+                usedPercent: 1,
+                resetsAt: nil,
+                durationMinutes: 10_080,
+                activation: .startsOnFirstUse
+            )
+        ) { error in
+            XCTAssertEqual(error as? DomainValidationError, .invalidWindowActivation)
+        }
+        XCTAssertThrowsError(
+            try QuotaWindow(
+                identifier: "codex:primary",
+                name: "Codex · 1-week",
+                usedPercent: 0,
+                resetsAt: Date(timeIntervalSince1970: 1_800_000_000),
+                durationMinutes: 10_080,
+                activation: .startsOnFirstUse
+            )
+        ) { error in
+            XCTAssertEqual(error as? DomainValidationError, .invalidWindowActivation)
+        }
+        XCTAssertThrowsError(
+            try QuotaWindow(
+                identifier: "codex:primary",
+                name: "Codex · 1-week",
+                usedPercent: 0,
+                resetsAt: nil,
+                durationMinutes: nil,
+                activation: .startsOnFirstUse
+            )
+        ) { error in
+            XCTAssertEqual(error as? DomainValidationError, .invalidWindowActivation)
+        }
+    }
+
+    func testLegacyQuotaWindowWithoutActivationStillDecodes() throws {
+        let data = try XCTUnwrap(
+            #"{"identifier":"codex:primary","name":"Codex · 1-week","usedPercent":0,"resetsAt":null,"durationMinutes":10080}"#
+                .data(using: .utf8)
+        )
+
+        let decoded = try JSONDecoder().decode(QuotaWindow.self, from: data)
+
+        XCTAssertNil(decoded.activation)
     }
 
     func testActualResetWinsWhenUnrelatedBucketIsExcluded() throws {

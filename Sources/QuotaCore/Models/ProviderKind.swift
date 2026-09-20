@@ -191,6 +191,7 @@ public enum DomainValidationError: LocalizedError, Equatable {
     case emptyQuotaWindowName
     case invalidUsagePercentage
     case invalidWindowDuration
+    case invalidWindowActivation
     case invalidBankedResetCredits
 
     public var errorDescription: String? {
@@ -213,6 +214,8 @@ public enum DomainValidationError: LocalizedError, Equatable {
             "Used percentage must be a non-negative number."
         case .invalidWindowDuration:
             "Window duration must be greater than zero."
+        case .invalidWindowActivation:
+            "A window that starts on first use must be unused, unscheduled, and have a duration."
         case .invalidBankedResetCredits:
             "Banked reset data contains an invalid count or expiry time."
         }

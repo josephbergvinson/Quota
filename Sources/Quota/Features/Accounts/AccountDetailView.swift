@@ -25,7 +25,8 @@ struct AccountDetailView: View {
             for: snapshot,
             accountKind: account.kind
         ).filter { window in
-            window.resetsAt.map { $0 > model.now } ?? true
+            UsageAnalytics.effectiveActivation(for: window, in: snapshot) == .startsOnFirstUse
+                || (window.resetsAt.map { $0 > model.now } ?? true)
         }
     }
 
@@ -280,6 +281,9 @@ struct AccountDetailView: View {
         ForEach(windows) { window in
             QuotaWindowRow(
                 window: window,
+                activation: snapshot.map {
+                    UsageAnalytics.effectiveActivation(for: window, in: $0)
+                } ?? window.activation,
                 isStale: capacity.isStale || didRefreshFail
             )
             if window.id != windows.last?.id {
@@ -844,6 +848,7 @@ private struct BankedResetCreditsView: View {
 
 private struct QuotaWindowRow: View {
     let window: QuotaWindow
+    let activation: QuotaWindowActivation?
     let isStale: Bool
 
     private var capacityStatus: CapacityStatus {
@@ -871,7 +876,12 @@ private struct QuotaWindowRow: View {
             HStack {
                 Text("\(window.usedPercent.formatted(.number.precision(.fractionLength(0...1))))% used")
                 Spacer()
-                if let reset = window.resetsAt {
+                if activation == .startsOnFirstUse {
+                    Label(
+                        isStale ? "Not started at last reading" : "Starts on first use",
+                        systemImage: "play.circle"
+                    )
+                } else if let reset = window.resetsAt {
                     Label(reset.formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
                 } else {
                     Text("Reset unavailable")

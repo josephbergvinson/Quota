@@ -144,6 +144,10 @@ public struct DailyUsagePoint: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum QuotaWindowActivation: String, Codable, Equatable, Sendable {
+    case startsOnFirstUse
+}
+
 public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
     public var id: String { identifier }
 
@@ -152,13 +156,15 @@ public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
     public let usedPercent: Double
     public let resetsAt: Date?
     public let durationMinutes: Int?
+    public let activation: QuotaWindowActivation?
 
     public init(
         identifier: String,
         name: String,
         usedPercent: Double,
         resetsAt: Date?,
-        durationMinutes: Int?
+        durationMinutes: Int?,
+        activation: QuotaWindowActivation? = nil
     ) throws {
         let normalizedIdentifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -171,12 +177,18 @@ public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
         if let durationMinutes, durationMinutes <= 0 {
             throw DomainValidationError.invalidWindowDuration
         }
+        if activation == .startsOnFirstUse {
+            guard usedPercent == 0, resetsAt == nil, durationMinutes != nil else {
+                throw DomainValidationError.invalidWindowActivation
+            }
+        }
 
         self.identifier = normalizedIdentifier
         self.name = normalizedName
         self.usedPercent = usedPercent
         self.resetsAt = resetsAt
         self.durationMinutes = durationMinutes
+        self.activation = activation
     }
 
     public var remainingPercent: Double {
@@ -189,7 +201,8 @@ public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
             name: name,
             usedPercent: usedPercent,
             resetsAt: resetsAt,
-            durationMinutes: durationMinutes
+            durationMinutes: durationMinutes,
+            activation: activation
         )
     }
 }

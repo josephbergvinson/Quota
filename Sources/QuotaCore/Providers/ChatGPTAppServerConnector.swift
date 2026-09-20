@@ -219,14 +219,18 @@ public actor ChatGPTAppServerConnector: ChatGPTAppServerConnecting {
                 )
             }
 
+            let rateLimitsReadStartedAt = Date()
             let rawLimits: ChatGPTRawRateLimitsResponse = try await session.request(
                 method: "account/rateLimits/read"
             )
+            let rateLimitsReadFinishedAt = Date()
             let rawUsage: ChatGPTRawTokenUsageResponse = try await session.request(
                 method: "account/usage/read"
             )
             return ChatGPTTelemetryDTO(
                 capturedAt: capturedAt,
+                rateLimitsReadStartedAt: rateLimitsReadStartedAt,
+                rateLimitsReadFinishedAt: rateLimitsReadFinishedAt,
                 account: account,
                 rateLimits: try rawLimits.validatedDTO(),
                 tokenUsage: try rawUsage.validatedDTO()

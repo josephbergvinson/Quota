@@ -513,17 +513,17 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
-    func testSavedSlidingUnusedChatGPTWindowIsIgnoredImmediately() throws {
+    func testSavedSlidingUnusedChatGPTWindowIsRecoveredWithoutSyntheticReset() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let capturedAt = calendar.date(from: DateComponents(year: 2026, month: 9, day: 2))!
         let account = try makeAccount(kind: .chatGPTPro)
         let placeholder = try QuotaWindow(
-            identifier: "codex-placeholder:primary",
-            name: "Unused · 5-hour",
+            identifier: "codex:primary",
+            name: "Codex · 1-week",
             usedPercent: 0,
-            resetsAt: capturedAt.addingTimeInterval(5 * 60 * 60),
-            durationMinutes: 300
+            resetsAt: capturedAt.addingTimeInterval(10_080 * 60),
+            durationMinutes: 10_080
         )
         let unavailable = UnavailableMetric(
             reason: .notExposedByProvider,
@@ -548,7 +548,52 @@ final class UsageAnalyticsTests: XCTestCase {
         )
         let interval = DateInterval(
             start: capturedAt,
-            end: capturedAt.addingTimeInterval(24 * 60 * 60)
+            end: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
+        )
+
+        let capacity = UsageAnalytics.capacity(
+            for: account,
+            snapshot: snapshot,
+            now: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
+        )
+        let events = UsageAnalytics.resetEvents(
+            accounts: [account],
+            snapshots: [snapshot],
+            in: interval
+        )
+        let available = UsageAnalytics.availableNowWindows(
+            accounts: [account],
+            latestSnapshots: [account.id: snapshot]
+        )
+
+        XCTAssertEqual(capacity.remainingFraction, 1)
+        XCTAssertEqual(capacity.status, .stale)
+        XCTAssertEqual(capacity.windowActivation, .startsOnFirstUse)
+        XCTAssertNil(capacity.nextResetAt)
+        XCTAssertEqual(available.map(\.account.id), [account.id])
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    func testStartsOnFirstUseWindowRemainsCapacityAndAppearsAvailableToday() throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = try makeAccount(name: "Unused Pro", kind: .chatGPTPro)
+        let window = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 0,
+            resetsAt: nil,
+            durationMinutes: 10_080,
+            activation: .startsOnFirstUse
+        )
+        let snapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: capturedAt,
+            windows: [window],
+            resetAt: nil
+        )
+        let interval = DateInterval(
+            start: capturedAt,
+            end: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
         )
 
         let capacity = UsageAnalytics.capacity(
@@ -556,14 +601,123 @@ final class UsageAnalyticsTests: XCTestCase {
             snapshot: snapshot,
             now: capturedAt.addingTimeInterval(60)
         )
+        let available = UsageAnalytics.availableNowWindows(
+            accounts: [account],
+            latestSnapshots: [account.id: snapshot]
+        )
         let events = UsageAnalytics.resetEvents(
             accounts: [account],
             snapshots: [snapshot],
             in: interval
         )
 
-        XCTAssertNil(capacity.remainingFraction)
-        XCTAssertEqual(capacity.status, .unavailable)
+        XCTAssertEqual(capacity.remainingFraction, 1)
+        XCTAssertEqual(capacity.limitingWindowName, "codex · 1-week")
+        XCTAssertNil(capacity.nextResetAt)
+        XCTAssertEqual(capacity.windowActivation, .startsOnFirstUse)
+        XCTAssertEqual(available.count, 1)
+        XCTAssertEqual(available.first?.account.id, account.id)
+        XCTAssertEqual(available.first?.windowName, "codex · 1-week")
+        XCTAssertEqual(available.first?.remainingFraction, 1)
+        XCTAssertEqual(available.first?.capturedAt, capturedAt)
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    func testUsedWindowReplacesEarlierStartsOnFirstUseState() throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = try makeAccount(kind: .chatGPTPro)
+        let activationWindow = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 0,
+            resetsAt: nil,
+            durationMinutes: 10_080,
+            activation: .startsOnFirstUse
+        )
+        let reset = capturedAt.addingTimeInterval(6 * 24 * 60 * 60)
+        let usedWindow = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 20,
+            resetsAt: reset,
+            durationMinutes: 10_080
+        )
+        let activationSnapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: capturedAt,
+            windows: [activationWindow],
+            resetAt: nil
+        )
+        let usedSnapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: capturedAt.addingTimeInterval(60),
+            windows: [usedWindow],
+            resetAt: reset
+        )
+
+        let available = UsageAnalytics.availableNowWindows(
+            accounts: [account],
+            latestSnapshots: [account.id: usedSnapshot]
+        )
+        let events = UsageAnalytics.resetEvents(
+            accounts: [account],
+            snapshots: [activationSnapshot, usedSnapshot],
+            in: DateInterval(
+                start: capturedAt,
+                end: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
+            )
+        )
+
+        XCTAssertTrue(available.isEmpty)
+        XCTAssertEqual(events.map(\.resetsAt), [reset])
+    }
+
+    func testStartsOnFirstUseStateSupersedesOlderScheduledReset() throws {
+        let capturedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = try makeAccount(kind: .chatGPTPro)
+        let reset = capturedAt.addingTimeInterval(6 * 24 * 60 * 60)
+        let scheduledWindow = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 90,
+            resetsAt: reset,
+            durationMinutes: 10_080
+        )
+        let activationWindow = try QuotaWindow(
+            identifier: "codex:primary",
+            name: "codex · 1-week",
+            usedPercent: 0,
+            resetsAt: nil,
+            durationMinutes: 10_080,
+            activation: .startsOnFirstUse
+        )
+        let scheduledSnapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: capturedAt,
+            windows: [scheduledWindow],
+            resetAt: reset
+        )
+        let activationSnapshot = makeChatGPTSnapshot(
+            accountID: account.id,
+            capturedAt: capturedAt.addingTimeInterval(60),
+            windows: [activationWindow],
+            resetAt: nil
+        )
+
+        let available = UsageAnalytics.availableNowWindows(
+            accounts: [account],
+            latestSnapshots: [account.id: activationSnapshot]
+        )
+        let events = UsageAnalytics.resetEvents(
+            accounts: [account],
+            snapshots: [scheduledSnapshot, activationSnapshot],
+            in: DateInterval(
+                start: capturedAt,
+                end: capturedAt.addingTimeInterval(8 * 24 * 60 * 60)
+            )
+        )
+
+        XCTAssertEqual(available.map(\.account.id), [account.id])
         XCTAssertTrue(events.isEmpty)
     }
 

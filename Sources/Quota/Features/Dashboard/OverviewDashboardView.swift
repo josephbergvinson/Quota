@@ -332,6 +332,13 @@ private struct AccountCapacityCard: View {
                             "Next reset \(reset.formatted(date: .abbreviated, time: .shortened))",
                             systemImage: "clock"
                         )
+                    } else if capacity.windowActivation == .startsOnFirstUse {
+                        Label(
+                            capacity.isStale || didRefreshFail
+                                ? "Last reported: reset clock not started"
+                                : "Reset clock starts on first use",
+                            systemImage: "play.circle"
+                        )
                     } else {
                         Label("Reset unavailable", systemImage: "clock.badge.questionmark")
                     }

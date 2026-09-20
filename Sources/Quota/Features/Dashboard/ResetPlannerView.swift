@@ -29,11 +29,17 @@ struct ResetPlannerView: View {
         .filter { $0.resetsAt >= model.now }
     }
 
+    private var availableNowWindows: [AvailableQuotaWindow] {
+        UsageAnalytics.availableNowWindows(
+            accounts: model.accounts,
+            latestSnapshots: model.latestSnapshots
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
-                currentCapacityStrip
                 resetCalendar
             }
             .padding(24)
@@ -61,53 +67,6 @@ struct ResetPlannerView: View {
         }
     }
 
-    @ViewBuilder
-    private var currentCapacityStrip: some View {
-        if !model.accounts.isEmpty {
-            VStack(alignment: .leading, spacing: 9) {
-                Text("Right now")
-                    .font(.headline)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(model.dashboardSummary.capacities, id: \.account.id) { capacity in
-                            let usesLastReported = capacity.isStale
-                                || didRefreshFail(for: capacity.account.id)
-                            Button {
-                                model.selection = .account(capacity.account.id)
-                            } label: {
-                                HStack(spacing: 9) {
-                                    ProviderIcon(provider: capacity.account.kind.provider, size: 26)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(capacity.account.displayName)
-                                            .font(.callout.weight(.medium))
-                                            .lineLimit(1)
-                                        Text(capacity.remainingFraction.map {
-                                            usesLastReported
-                                                ? "\(QuotaFormat.percentage($0)) last reported"
-                                                : "\(QuotaFormat.percentage($0)) left"
-                                        } ?? "Capacity unavailable")
-                                        .font(.caption)
-                                        .foregroundStyle(
-                                            usesLastReported ? CapacityStatus.stale.color : capacity.status.color
-                                        )
-                                    }
-                                }
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 9)
-                            }
-                            .buttonStyle(.plain)
-                            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 11))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 11)
-                                    .stroke(.quaternary, lineWidth: 1)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private var resetCalendar: some View {
         ScrollView(.horizontal, showsIndicators: true) {
             HStack(alignment: .top, spacing: 9) {
@@ -115,6 +74,9 @@ struct ResetPlannerView: View {
                     ResetDayColumn(
                         day: day,
                         events: events.filter { calendar.isDate($0.resetsAt, inSameDayAs: day) },
+                        availableWindows: calendar.isDate(day, inSameDayAs: model.now)
+                            ? availableNowWindows
+                            : [],
                         calendar: calendar,
                         now: model.now
                     )
@@ -133,24 +95,18 @@ struct ResetPlannerView: View {
         }
         return "\(resetInterval.start.formatted(.dateTime.month(.abbreviated).day())) – \(lastDay.formatted(.dateTime.month(.abbreviated).day().year()))"
     }
-
-    private func didRefreshFail(for accountID: UUID) -> Bool {
-        if case .failed = model.refreshStates[accountID] {
-            return true
-        }
-        return false
-    }
 }
 
 private struct ResetDayColumn: View {
     @EnvironmentObject private var model: AppModel
     let day: Date
     let events: [ResetEvent]
+    let availableWindows: [AvailableQuotaWindow]
     let calendar: Calendar
     let now: Date
 
     private var isToday: Bool {
-        calendar.isDateInToday(day)
+        calendar.isDate(day, inSameDayAs: now)
     }
 
     var body: some View {
@@ -166,7 +122,7 @@ private struct ResetDayColumn: View {
 
             Divider()
 
-            if events.isEmpty {
+            if events.isEmpty && availableWindows.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "calendar")
                         .foregroundStyle(.tertiary)
@@ -177,6 +133,13 @@ private struct ResetDayColumn: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 90)
             } else {
+                ForEach(availableWindows) { window in
+                    AvailableNowCard(
+                        window: window,
+                        now: now,
+                        refreshFailed: didRefreshFail(for: window.account.id)
+                    )
+                }
                 ForEach(events) { event in
                     ResetEventCard(
                         event: event,
@@ -208,6 +171,85 @@ private struct ResetDayColumn: View {
             return true
         }
         return false
+    }
+}
+
+private struct AvailableNowCard: View {
+    let window: AvailableQuotaWindow
+    let now: Date
+    let refreshFailed: Bool
+
+    private var isStale: Bool {
+        refreshFailed
+            || now.timeIntervalSince(window.capturedAt) > UsageAnalytics.capacityFreshnessInterval
+            || window.capturedAt.timeIntervalSince(now) > 5 * 60
+    }
+
+    private var capacityStatus: CapacityStatus {
+        isStale ? .stale : .freshStatus(forRemainingFraction: window.remainingFraction)
+    }
+
+    private var capacityDescription: String {
+        isStale
+            ? "\(QuotaFormat.percentage(window.remainingFraction)) last reported"
+            : "\(QuotaFormat.percentage(window.remainingFraction)) left"
+    }
+
+    private var availabilityTitle: String {
+        isStale ? "Last reported available" : "Available now"
+    }
+
+    private var activationDescription: String {
+        isStale
+            ? "Reset clock had not started at that reading"
+            : "Reset clock starts on first use"
+    }
+
+    private var updateDescription: String {
+        if refreshFailed {
+            return "Refresh failed · last saved reading"
+        }
+        return "Updated \(window.capturedAt.formatted(.relative(presentation: .named)))"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(availabilityTitle)
+                .font(.caption.weight(.semibold))
+            Text(window.account.displayName)
+                .font(.callout.weight(.medium))
+                .lineLimit(2)
+            Text(window.windowName)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Label(capacityDescription, systemImage: capacityStatus.indicatorSymbolName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(capacityStatus.color)
+                .help(capacityStatus.label)
+            Text(activationDescription)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(updateDescription)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(window.account.kind.provider.tintColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(window.account.kind.provider.tintColor)
+                .frame(width: 3)
+                .padding(.vertical, 5)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(window.account.displayName), \(window.windowName), \(availabilityTitle)")
+        .accessibilityValue(
+            "\(capacityDescription). \(activationDescription). \(updateDescription)."
+        )
     }
 }
 

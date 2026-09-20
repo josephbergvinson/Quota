@@ -25,6 +25,7 @@ public struct AccountCapacity: Sendable, Equatable {
     public let remainingFraction: Double?
     public let limitingWindowName: String?
     public let nextResetAt: Date?
+    public let windowActivation: QuotaWindowActivation?
     public let capturedAt: Date?
     public let isStale: Bool
 
@@ -33,6 +34,7 @@ public struct AccountCapacity: Sendable, Equatable {
         remainingFraction: Double?,
         limitingWindowName: String?,
         nextResetAt: Date?,
+        windowActivation: QuotaWindowActivation? = nil,
         capturedAt: Date?,
         isStale: Bool
     ) {
@@ -40,6 +42,7 @@ public struct AccountCapacity: Sendable, Equatable {
         self.remainingFraction = remainingFraction
         self.limitingWindowName = limitingWindowName
         self.nextResetAt = nextResetAt
+        self.windowActivation = windowActivation
         self.capturedAt = capturedAt
         self.isStale = isStale
     }
@@ -88,6 +91,34 @@ public struct ResetEvent: Identifiable, Sendable, Equatable {
         self.account = account
         self.windowName = windowName
         self.resetsAt = resetsAt
+        self.remainingFraction = min(1, max(0, remainingFraction))
+        self.capturedAt = capturedAt
+        self.source = source
+    }
+}
+
+/// A provider-reported quota window that is fully available but has no scheduled reset yet.
+/// ChatGPT starts these rolling windows on first use, so presenting a future date before then
+/// would turn a moving provider placeholder into a false calendar promise.
+public struct AvailableQuotaWindow: Identifiable, Sendable, Equatable {
+    public let id: String
+    public let account: ConnectedAccount
+    public let windowName: String
+    public let remainingFraction: Double
+    public let capturedAt: Date
+    public let source: UsageSource
+
+    public init(
+        account: ConnectedAccount,
+        windowIdentifier: String,
+        windowName: String,
+        remainingFraction: Double,
+        capturedAt: Date,
+        source: UsageSource
+    ) {
+        self.id = "\(account.id.uuidString)|\(windowIdentifier)|available"
+        self.account = account
+        self.windowName = windowName
         self.remainingFraction = min(1, max(0, remainingFraction))
         self.capturedAt = capturedAt
         self.source = source
@@ -174,15 +205,17 @@ public enum UsageAnalytics {
             capacityWindows = supportedWindows
         }
         let activeWindows = capacityWindows.filter { window in
-            !isClearlyUninitializedChatGPTWindow(window, in: snapshot)
-                && (window.resetsAt.map { $0 > now } ?? true)
+            effectiveActivation(for: window, in: snapshot) == .startsOnFirstUse
+                || (window.resetsAt.map { $0 > now } ?? true)
         }
         if let limitingWindow = activeWindows.min(by: { $0.remainingPercent < $1.remainingPercent }) {
+            let activation = effectiveActivation(for: limitingWindow, in: snapshot)
             return AccountCapacity(
                 account: account,
                 remainingFraction: limitingWindow.remainingPercent / 100,
                 limitingWindowName: limitingWindow.name,
-                nextResetAt: limitingWindow.resetsAt,
+                nextResetAt: activation == .startsOnFirstUse ? nil : limitingWindow.resetsAt,
+                windowActivation: activation,
                 capturedAt: snapshot.capturedAt,
                 isStale: isStale
             )
@@ -225,6 +258,38 @@ public enum UsageAnalytics {
         guard snapshot.source == .chatGPTAppServer else { return windows }
         return windows.filter {
             ChatGPTQuotaWindowPolicy.isSupportedWindow($0, accountKind: accountKind)
+        }
+    }
+
+    /// Returns current windows whose reset clock has not started. These belong in today's
+    /// planning context as immediately available capacity, not at a fabricated future time.
+    public static func availableNowWindows(
+        accounts: [ConnectedAccount],
+        latestSnapshots: [UUID: UsageSnapshot]
+    ) -> [AvailableQuotaWindow] {
+        accounts.flatMap { account -> [AvailableQuotaWindow] in
+            guard let snapshot = latestSnapshots[account.id] else { return [] }
+            return supportedQuotaWindows(for: snapshot, accountKind: account.kind)
+                .filter { effectiveActivation(for: $0, in: snapshot) == .startsOnFirstUse }
+                .map { window in
+                    AvailableQuotaWindow(
+                        account: account,
+                        windowIdentifier: window.identifier,
+                        windowName: window.name,
+                        remainingFraction: window.remainingPercent / 100,
+                        capturedAt: snapshot.capturedAt,
+                        source: snapshot.source
+                    )
+                }
+        }
+        .sorted { left, right in
+            let accountOrder = left.account.displayName.localizedStandardCompare(
+                right.account.displayName
+            )
+            if accountOrder == .orderedSame {
+                return left.windowName.localizedStandardCompare(right.windowName) == .orderedAscending
+            }
+            return accountOrder == .orderedAscending
         }
     }
 
@@ -365,8 +430,25 @@ public enum UsageAnalytics {
         return windows.first(where: { $0.identifier == windowIdentifier })?.resetsAt != resetsAt
     }
 
-    /// Older saved readings can contain an unused Codex bucket whose reset was anchored to the
-    /// refresh instant. Ignore that exact sliding-placeholder signature during local analysis too.
+    /// Normalizes the explicit activation state and the exact sliding-placeholder signature from
+    /// older saved Codex readings without treating the moving timestamp as a scheduled reset.
+    public static func effectiveActivation(
+        for window: QuotaWindow,
+        in snapshot: UsageSnapshot
+    ) -> QuotaWindowActivation? {
+        if
+            window.activation == .startsOnFirstUse,
+            window.usedPercent == 0,
+            window.resetsAt == nil,
+            window.durationMinutes != nil
+        {
+            return .startsOnFirstUse
+        }
+        return isClearlyUninitializedChatGPTWindow(window, in: snapshot)
+            ? .startsOnFirstUse
+            : nil
+    }
+
     private static func isClearlyUninitializedChatGPTWindow(
         _ window: QuotaWindow,
         in snapshot: UsageSnapshot
