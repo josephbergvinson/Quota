@@ -132,6 +132,48 @@ final class ChatGPTAppServerConnectorTests: XCTestCase {
         XCTAssertEqual(discovered, bundledExecutable.standardizedFileURL)
     }
 
+    func testExecutableDiscoveryFindsNestedChatGPTCLIWithoutFinderPATH() throws {
+        let root = try makeTemporaryDirectory()
+        let chatGPTApp = root.appendingPathComponent("ChatGPT.app", isDirectory: true)
+        let nestedExecutable = chatGPTApp.appendingPathComponent(
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        )
+        try makeExecutable(at: nestedExecutable)
+
+        let discovered = ChatGPTAppServerConfiguration.discoverCodexExecutable(
+            bundledCandidate: nil,
+            applicationCandidates: ChatGPTAppServerConfiguration.applicationCodexCandidates(
+                applicationBundleURLs: [chatGPTApp]
+            ),
+            path: "/usr/bin:/bin:/usr/sbin:/sbin",
+            homeDirectoryURL: root.appendingPathComponent("home", isDirectory: true),
+            systemSearchDirectories: [],
+            fileManager: .default
+        )
+
+        XCTAssertEqual(discovered, nestedExecutable.standardizedFileURL)
+    }
+
+    func testExecutableDiscoveryRetainsLegacyChatGPTAppLayout() throws {
+        let root = try makeTemporaryDirectory()
+        let chatGPTApp = root.appendingPathComponent("ChatGPT.app", isDirectory: true)
+        let legacyExecutable = chatGPTApp.appendingPathComponent("Contents/Resources/codex")
+        try makeExecutable(at: legacyExecutable)
+
+        let discovered = ChatGPTAppServerConfiguration.discoverCodexExecutable(
+            bundledCandidate: nil,
+            applicationCandidates: ChatGPTAppServerConfiguration.applicationCodexCandidates(
+                applicationBundleURLs: [chatGPTApp]
+            ),
+            path: nil,
+            homeDirectoryURL: root.appendingPathComponent("home", isDirectory: true),
+            systemSearchDirectories: [],
+            fileManager: .default
+        )
+
+        XCTAssertEqual(discovered, legacyExecutable.standardizedFileURL)
+    }
+
     func testExecutableDiscoveryFindsStandaloneInstallOutsideFinderPATH() throws {
         let root = try makeTemporaryDirectory()
         let home = root.appendingPathComponent("home", isDirectory: true)

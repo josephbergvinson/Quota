@@ -120,10 +120,12 @@ public struct ChatGPTAppServerConfiguration: Equatable, Sendable {
         let fileManager = FileManager.default
         return discoverCodexExecutable(
             bundledCandidate: Bundle.main.url(forAuxiliaryExecutable: "codex"),
-            applicationCandidates: [
-                URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
-                URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex")
-            ],
+            applicationCandidates: applicationCodexCandidates(
+                applicationBundleURLs: [
+                    URL(fileURLWithPath: "/Applications/ChatGPT.app", isDirectory: true),
+                    URL(fileURLWithPath: "/Applications/Codex.app", isDirectory: true)
+                ]
+            ),
             path: ProcessInfo.processInfo.environment["PATH"],
             homeDirectoryURL: fileManager.homeDirectoryForCurrentUser,
             systemSearchDirectories: [
@@ -202,6 +204,25 @@ public struct ChatGPTAppServerConfiguration: Equatable, Sendable {
             return standardizedCandidate
         }
         return nil
+    }
+
+    /// OpenAI has shipped Codex both as a top-level app resource and as a nested CLI app.
+    /// Keep the native nested executable first, with its launcher and the legacy layout as
+    /// fallbacks, so Finder-launched Quota does not depend on a shell-provided `PATH`.
+    static func applicationCodexCandidates(applicationBundleURLs: [URL]) -> [URL] {
+        let relativePathComponents = [
+            ["Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex"],
+            ["Contents", "Resources", "codex-cli", "bin", "codex"],
+            ["Contents", "Resources", "codex"]
+        ]
+
+        return applicationBundleURLs.flatMap { applicationBundleURL in
+            relativePathComponents.map { components in
+                components.reduce(applicationBundleURL) { partialURL, component in
+                    partialURL.appendingPathComponent(component, isDirectory: false)
+                }
+            }
+        }
     }
 
     private static func nvmCodexCandidates(
