@@ -75,7 +75,9 @@ jobs:
           }
           trap cleanup_verification_directory EXIT
 
-          lipo "${app_path}/Contents/MacOS/Quota" -verify_arch arm64 x86_64
+          for architecture in arm64 x86_64; do
+            lipo "${app_path}/Contents/MacOS/Quota" -verify_arch "${architecture}"
+          done
           xattr -cr "${app_path}"
           codesign \
             --force \
@@ -96,8 +98,10 @@ jobs:
           ditto -x -k "${archive_path}" "${verification_directory}"
           codesign --verify --deep --strict --verbose=2 \
             "${verification_directory}/Quota.app"
-          lipo "${verification_directory}/Quota.app/Contents/MacOS/Quota" \
-            -verify_arch arm64 x86_64
+          for architecture in arm64 x86_64; do
+            lipo "${verification_directory}/Quota.app/Contents/MacOS/Quota" \
+              -verify_arch "${architecture}"
+          done
           (
             cd dist
             shasum -a 256 "${archive_name}" > "${archive_name}.sha256"

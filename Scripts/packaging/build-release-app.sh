@@ -96,7 +96,9 @@ iconutil -c icns "${iconset_directory}" \
     -o "${staged_app}/Contents/Resources/Quota.icns"
 
 plutil -lint "${staged_app}/Contents/Info.plist"
-lipo "${staged_app}/Contents/MacOS/Quota" -verify_arch arm64 x86_64
+for architecture in arm64 x86_64; do
+    lipo "${staged_app}/Contents/MacOS/Quota" -verify_arch "${architecture}"
+done
 
 case "${destination}" in
     */Quota.app) ;;

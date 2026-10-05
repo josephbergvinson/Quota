@@ -91,6 +91,7 @@ final class ClaudeCodeConnectorTests: XCTestCase {
         XCTAssertEqual(environment["HOME"], "/Users/test")
         XCTAssertEqual(environment["PATH"], "/usr/bin:/bin")
         XCTAssertEqual(environment["CLAUDE_CONFIG_DIR"], directory.path)
+        XCTAssertEqual(environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"], directory.path)
         XCTAssertEqual(environment["DISABLE_AUTOUPDATER"], "1")
         XCTAssertNil(environment["ANTHROPIC_API_KEY"])
         XCTAssertNil(environment["ANTHROPIC_AUTH_TOKEN"])
@@ -159,6 +160,42 @@ final class ClaudeCodeConnectorTests: XCTestCase {
         )
 
         XCTAssertEqual(selected, newest)
+    }
+
+    func testExecutableLocatorFindsHashedClaudeDesktopManagedLayout() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "quota-claude-locator-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: home,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: home) }
+        let executable = home.appendingPathComponent(
+            "Library/Application Support/Claude/claude-code/2.1.286/"
+                + "f2326db61802/claude.app/Contents/MacOS/claude"
+        )
+        try makeExecutable(at: executable, source: "#!/bin/sh\nexit 0\n")
+
+        let candidates = ClaudeCodeExecutableLocator.candidateURLs(
+            fileManager: .default,
+            homeDirectoryURL: home,
+            environment: [:]
+        )
+        let resolvedExecutable = executable.resolvingSymlinksInPath().standardizedFileURL
+        XCTAssertTrue(
+            candidates
+                .map { $0.resolvingSymlinksInPath().standardizedFileURL }
+                .contains(resolvedExecutable)
+        )
+
+        let selected = try ClaudeCodeExecutableLocator.selectNewestCompatible(
+            from: candidates,
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0.path) },
+            isTrusted: { $0 == resolvedExecutable }
+        )
+        XCTAssertEqual(selected, resolvedExecutable)
     }
 
     func testExecutableLocatorRejectsOnlyOldSignedVersions() {
@@ -880,5 +917,17 @@ final class ClaudeCodeConnectorTests: XCTestCase {
             ofItemAtPath: executableURL.path
         )
         return executableURL
+    }
+
+    private func makeExecutable(at executableURL: URL, source: String) throws {
+        try FileManager.default.createDirectory(
+            at: executableURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try source.write(to: executableURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: executableURL.path
+        )
     }
 }

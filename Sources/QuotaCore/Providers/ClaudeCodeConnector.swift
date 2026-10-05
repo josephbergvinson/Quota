@@ -1389,6 +1389,9 @@ func sanitizedClaudeEnvironment(
     ]
     var environment = parentEnvironment.filter { allowedNames.contains($0.key.uppercased()) }
     environment["CLAUDE_CONFIG_DIR"] = configurationDirectoryURL.path
+    // Current Claude Code releases can scope secure storage independently from configuration.
+    // Pin both to the same account directory so upgrades keep using the existing Keychain item.
+    environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = configurationDirectoryURL.path
     environment["DISABLE_AUTOUPDATER"] = "1"
     return environment
 }
@@ -1457,9 +1460,30 @@ enum ClaudeCodeExecutableLocator {
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) {
-            candidates.append(contentsOf: versions.map {
-                $0.appendingPathComponent("claude.app/Contents/MacOS/claude", isDirectory: false)
-            })
+            for versionDirectory in versions {
+                // Keep accepting the original layout used by Claude Desktop.
+                candidates.append(
+                    versionDirectory.appendingPathComponent(
+                        "claude.app/Contents/MacOS/claude",
+                        isDirectory: false
+                    )
+                )
+
+                // Newer Claude Desktop builds add one opaque build directory between the
+                // semantic version and app bundle. Search exactly that one extra level only.
+                if let builds = try? fileManager.contentsOfDirectory(
+                    at: versionDirectory,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ) {
+                    candidates.append(contentsOf: builds.map {
+                        $0.appendingPathComponent(
+                            "claude.app/Contents/MacOS/claude",
+                            isDirectory: false
+                        )
+                    })
+                }
+            }
         }
 
         let nativeRoot = homeDirectoryURL
@@ -1570,7 +1594,21 @@ enum ClaudeCodeExecutableLocator {
             }
         }
 
-        // Claude Desktop's managed copy uses a version directory immediately above its app bundle.
+        // Newer Claude Desktop builds insert an opaque build directory below the version.
+        if components.count >= 7 {
+            let suffix = Array(components.suffix(7))
+            if
+                suffix[0] == "claude-code",
+                suffix[3] == "claude.app",
+                suffix[4] == "Contents",
+                suffix[5] == "MacOS",
+                suffix[6] == "claude"
+            {
+                return ClaudeCodeVersion(suffix[1])
+            }
+        }
+
+        // Older Claude Desktop builds put the app bundle immediately below the version.
         if components.count >= 6 {
             let suffix = Array(components.suffix(6))
             if
