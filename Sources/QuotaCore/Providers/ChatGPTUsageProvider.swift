@@ -365,24 +365,34 @@ public struct ChatGPTUsageProvider: UsageProvider {
     }
 
     private func humanReadablePlan(_ planType: String) -> String {
-        planType
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .localizedCapitalized
+        switch normalizedPlanIdentifier(planType) {
+        case "prolite", "chatgptprolite":
+            return "Pro Lite"
+        case "promax", "chatgptpromax":
+            return "Pro Max"
+        default:
+            return planType
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .localizedCapitalized
+        }
     }
 
     func resolvedAccountKind(from planType: String) -> AccountKind? {
-        let words = planType
-            .lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-        if words.contains("plus") {
+        // Codex uses compact consumer tier IDs; matching a "pro"/"plus" word also
+        // incorrectly admits organization tiers such as edu_pro and edu_plus.
+        switch normalizedPlanIdentifier(planType) {
+        case "plus", "chatgptplus":
             return .chatGPTPlus
-        }
-        if words.contains("pro") {
+        case "pro", "chatgptpro", "prolite", "chatgptprolite", "promax", "chatgptpromax":
             return .chatGPTPro
+        default:
+            return nil
         }
-        return nil
+    }
+
+    private func normalizedPlanIdentifier(_ planType: String) -> String {
+        planType.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     private func bankedResetStatus(_ status: String) -> BankedResetCreditStatus {

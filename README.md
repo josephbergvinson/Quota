@@ -81,6 +81,8 @@ Running `make install` again replaces only `~/Applications/Quota.app`; it does n
 
 ChatGPT telemetry is the supported ChatGPT-backed **Codex** surface. It is not a general API for every quota in ChatGPT web, voice, images, deep research, or other products. Quota preserves the window names returned by Codex and leaves unsupported account-wide model breakdowns unavailable.
 
+ChatGPT Pro includes the consumer Pro Lite and Pro Max tiers reported by Codex. Quota uses their reported quotas and reset times without deriving allowances from plan prices or multipliers. Business, Team, Enterprise, and education plans are not supported.
+
 When Codex reports earned banked resets, Quota shows the provider's authoritative available count on the account. Credit details can be unavailable or capped, and individual credits may not expire, so Quota labels missing expiry details instead of deriving them from the count.
 
 The Overview uses one common 7-day, 30-day, or all-reported-history range for its headline totals and chart. Each account chart offers the same ranges; its all-time view merges that account's locally retained provider history without double-counting overlapping reports. Total tokens include every account with daily provider data. Cached input, uncached input, and output cards and chart categories appear only when at least one connected provider reports those splits; otherwise the chart is total-only. Usage charts can switch between daily activity and a cumulative running total for the selected range.

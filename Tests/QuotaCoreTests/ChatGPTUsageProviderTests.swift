@@ -6,9 +6,20 @@ final class ChatGPTUsageProviderTests: XCTestCase {
     func testReportedPlanResolvesPlusAndProWithoutGuessingOtherTiers() {
         let provider = makeProvider()
 
-        XCTAssertEqual(provider.resolvedAccountKind(from: "chatgpt_plus"), .chatGPTPlus)
-        XCTAssertEqual(provider.resolvedAccountKind(from: "Pro"), .chatGPTPro)
-        XCTAssertNil(provider.resolvedAccountKind(from: "business"))
+        for plan in ["plus", "chatgpt_plus", " ChatGPT Plus "] {
+            XCTAssertEqual(provider.resolvedAccountKind(from: plan), .chatGPTPlus, plan)
+        }
+        for plan in ["Pro", "chatgpt_pro", "prolite", "promax", "ChatGPT Pro Lite", "chatgpt_pro_max"] {
+            XCTAssertEqual(provider.resolvedAccountKind(from: plan), .chatGPTPro, plan)
+        }
+        for plan in [
+            "free", "go", "team", "self_serve_business_prolite",
+            "self_serve_business_usage_based", "business", "ent26",
+            "enterprise_cbp_automation", "enterprise_cbp_usage_based", "enterprise",
+            "edu", "edu_plus", "edu_pro", "unknown", "pro_future", "", "not-pro"
+        ] {
+            XCTAssertNil(provider.resolvedAccountKind(from: plan), plan)
+        }
     }
 
     func testProviderRejectsReportedUnsupportedSubscriptionTier() async throws {
@@ -97,23 +108,53 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             localKind: .chatGPTPro,
             rateLimits: limits
         )
-        let reportedPro = try await fetchResult(
-            email: "pro@example.com",
-            reportedPlan: "pro",
-            localKind: .chatGPTPlus,
-            rateLimits: limits
-        )
-
         XCTAssertEqual(reportedPlus.resolvedAccountKind, .chatGPTPlus)
         XCTAssertEqual(
             reportedPlus.snapshot.quotaWindows.value?.map(\.name),
             ["Codex · 5-hour", "Codex · 1-week"]
         )
-        XCTAssertEqual(reportedPro.resolvedAccountKind, .chatGPTPro)
-        XCTAssertEqual(
-            reportedPro.snapshot.quotaWindows.value?.map(\.name),
-            ["Codex · 1-week"]
+        for plan in ["pro", "prolite", "promax"] {
+            let reportedPro = try await fetchResult(
+                email: "pro@example.com",
+                reportedPlan: plan,
+                localKind: .chatGPTPlus,
+                rateLimits: limits
+            )
+            XCTAssertEqual(reportedPro.resolvedAccountKind, .chatGPTPro, plan)
+            XCTAssertEqual(
+                reportedPro.snapshot.quotaWindows.value?.map(\.name),
+                ["Codex · 1-week"],
+                plan
+            )
+        }
+    }
+
+    func testUpgradedProPlansPreserveReportedWeeklyQuotaAndReadablePlan() async throws {
+        let now = Date(timeIntervalSince1970: 1_788_264_000)
+        let reset = now.addingTimeInterval(7 * 24 * 60 * 60)
+        let limits = ChatGPTRateLimitsDTO(
+            rateLimits: makeSnapshot(
+                limitID: "codex",
+                primary: makeWindow(usedPercent: 1, durationMinutes: 10_080, resetsAt: reset)
+            ),
+            rateLimitsByLimitID: nil,
+            resetCredits: nil
         )
+
+        for (plan, label) in [("prolite", "Pro Lite"), ("promax", "Pro Max")] {
+            let result = try await fetchResult(
+                email: "pro@example.com",
+                reportedPlan: plan,
+                rateLimits: limits
+            )
+            XCTAssertEqual(result.resolvedAccountKind, .chatGPTPro)
+            XCTAssertEqual(result.providerPlanLabel, label)
+            let window = try XCTUnwrap(result.snapshot.quotaWindows.value?.first)
+            XCTAssertEqual(window.identifier, "codex:primary")
+            XCTAssertEqual(window.remainingPercent, 99)
+            XCTAssertEqual(window.resetsAt, reset)
+            XCTAssertEqual(result.snapshot.resetAt.value, reset)
+        }
     }
 
     func testBankedResetCreditsUseAuthoritativeCountAndPreserveExpiryDetails() throws {
