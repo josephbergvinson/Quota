@@ -288,7 +288,16 @@ final class QuotaRepositoryTests: XCTestCase {
             dataStore: try LocalDataStore(directoryURL: temporaryDirectory),
             credentialStore: NeverUseCredentialStore()
         )
-        let account = try makeAccount(kind: .chatGPTPro)
+        let billing = try SubscriptionBillingDetails(
+            planName: "Invoice plan",
+            renewalDate: Date(timeIntervalSince1970: 1_800_000_000),
+            costCADCents: 12_999
+        )
+        let account = try ConnectedAccount(
+            displayName: "Subscription",
+            kind: .chatGPTPro,
+            subscriptionBilling: billing
+        )
         _ = try await repository.add(account: account, credential: nil)
         let directlyRelabeled = try ConnectedAccount(
             id: account.id,
@@ -321,6 +330,7 @@ final class QuotaRepositoryTests: XCTestCase {
         )
 
         XCTAssertEqual(state.accounts.first?.kind, .chatGPTPlus)
+        XCTAssertEqual(state.accounts.first?.subscriptionBilling, billing)
         XCTAssertEqual(state.snapshots, [snapshot])
         let reloaded = try await LocalDataStore(directoryURL: temporaryDirectory).load()
         XCTAssertEqual(reloaded, state)

@@ -27,6 +27,10 @@ struct AccountEditorView: View {
     @State private var accountKind: AccountKind
     @State private var organizationIdentifier: String
     @State private var credential: String = ""
+    @State private var subscriptionPlan: String
+    @State private var subscriptionCost: String
+    @State private var hasRenewalDate: Bool
+    @State private var renewalDate: Date
     @State private var validationMessage: String?
     @State private var isSaving = false
 
@@ -36,6 +40,14 @@ struct AccountEditorView: View {
         _displayName = State(initialValue: existing?.displayName ?? AccountKind.chatGPTPro.displayName)
         _accountKind = State(initialValue: existing?.kind ?? .chatGPTPro)
         _organizationIdentifier = State(initialValue: existing?.organizationIdentifier ?? "")
+        let billing = existing?.subscriptionBilling
+        _subscriptionPlan = State(initialValue: billing?.planName ?? "")
+        _subscriptionCost = State(initialValue: billing?.costCADCents.map {
+            String(format: "%lld.%02lld", $0 / 100, $0 % 100)
+        } ?? "")
+        _hasRenewalDate = State(initialValue: billing?.renewalDate != nil)
+        _renewalDate = State(initialValue: billing?.renewalDate
+            ?? SubscriptionBillingDetails.billingDate(onLocalDayOf: .now))
     }
 
     var body: some View {
@@ -54,6 +66,10 @@ struct AccountEditorView: View {
                             displayName = newValue.displayName
                             organizationIdentifier = ""
                             credential = ""
+                            subscriptionPlan = ""
+                            subscriptionCost = ""
+                            hasRenewalDate = false
+                            renewalDate = SubscriptionBillingDetails.billingDate(onLocalDayOf: .now)
                         }
                     }
 
@@ -63,6 +79,27 @@ struct AccountEditorView: View {
                     if accountKind == .openAIAPI {
                         TextField("Organization ID (optional)", text: $organizationIdentifier)
                             .textFieldStyle(.roundedBorder)
+                    }
+                }
+
+                if accountKind.isManagedSubscription {
+                    Section("Subscription Billing") {
+                        TextField("Plan on invoice (optional)", text: $subscriptionPlan)
+                        TextField("Cost per billing cycle (CAD)", text: $subscriptionCost, prompt: Text("e.g. 129.99"))
+                        Toggle("Record a renewal date", isOn: $hasRenewalDate)
+                        if hasRenewalDate {
+                            DatePicker("Renewal date", selection: $renewalDate, displayedComponents: .date)
+                                .environment(\.calendar, SubscriptionBillingDetails.billingCalendar)
+                                .environment(\.timeZone, .gmt)
+                        }
+                        Text("Optional. Copy the details from your invoice or billing settings. Quota does not fetch billing data or advance this date automatically.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let url = URL(string: accountKind.isClaudeSubscription
+                            ? "https://claude.ai/settings/billing"
+                            : "https://chatgpt.com/#settings/Billing") {
+                            Link("Open provider billing settings", destination: url)
+                        }
                     }
                 }
 
@@ -146,7 +183,7 @@ struct AccountEditorView: View {
             }
             .padding(16)
         }
-        .frame(width: 520, height: accountKind.requiresCredential ? 500 : 440)
+        .frame(width: 520, height: accountKind.requiresCredential ? 500 : 600)
         .navigationTitle(mode.title)
     }
 
@@ -179,12 +216,22 @@ struct AccountEditorView: View {
 
         do {
             let existing = mode.existingAccount
+            let billing: SubscriptionBillingDetails? = if accountKind.isManagedSubscription {
+                try SubscriptionBillingDetails(
+                    planName: subscriptionPlan,
+                    renewalDate: hasRenewalDate ? renewalDate : nil,
+                    costCADCents: SubscriptionBillingDetails.parseCADCents(subscriptionCost)
+                )
+            } else {
+                nil
+            }
             let account = try ConnectedAccount(
                 id: existing?.id ?? UUID(),
                 displayName: displayName,
                 kind: existing?.kind ?? accountKind,
                 organizationIdentifier: accountKind == .openAIAPI ? organizationIdentifier : nil,
-                createdAt: existing?.createdAt ?? Date()
+                createdAt: existing?.createdAt ?? Date(),
+                subscriptionBilling: billing
             )
 
             let replacementCredential: ProviderCredential?

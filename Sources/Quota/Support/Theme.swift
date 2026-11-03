@@ -73,8 +73,11 @@ enum QuotaFormat {
         value.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
     }
 
-    static func amount(_ value: Double, unit: UsageUnit) -> String {
-        switch unit {
+    static func amount(_ value: Double, unit: UsageUnit, currencyCode: String? = nil) -> String {
+        if let currencyCode {
+            return value.formatted(.currency(code: currencyCode).presentation(.isoCode))
+        }
+        return switch unit {
         case .messages, .tokens, .credits:
             value.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
         case .dollars:

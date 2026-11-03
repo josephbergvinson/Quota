@@ -47,14 +47,14 @@ public struct ChatGPTUsageProvider: UsageProvider {
             throw ProviderError.invalidResponse
         }
         let normalizedEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard let resolvedAccountKind = resolvedAccountKind(from: planType) else {
+        guard let plan = resolvedPlan(from: planType) else {
             throw ChatGPTConnectorError.unsupportedSubscriptionPlan
         }
         let quotaWindows = try makeQuotaWindows(
             from: telemetry.rateLimits,
             capturedAt: telemetry.rateLimitsReadStartedAt ?? telemetry.capturedAt,
             readFinishedAt: telemetry.rateLimitsReadFinishedAt,
-            accountKind: resolvedAccountKind
+            accountKind: plan.kind
         )
         let bankedResetCredits = try makeBankedResetCredits(
             from: telemetry.rateLimits.resetCredits
@@ -128,6 +128,7 @@ public struct ChatGPTUsageProvider: UsageProvider {
                 quotaWindows: quotaMetric,
                 resetAt: resetMetric,
                 bankedResetCredits: bankedResetCredits,
+                usageCredits: makeUsageCredits(from: telemetry.rateLimits),
                 totalTokens: tokenTotal.map(Metric.available)
                     ?? .unavailable(
                         UnavailableMetric(
@@ -159,9 +160,29 @@ public struct ChatGPTUsageProvider: UsageProvider {
             providerIdentityKey: normalizedEmail.isEmpty
                 ? nil
                 : "email:\(normalizedEmail.lowercased())",
-            providerPlanLabel: humanReadablePlan(planType),
-            resolvedAccountKind: resolvedAccountKind
+            providerPlanLabel: plan.label,
+            resolvedAccountKind: plan.kind
         )
+    }
+
+    private func makeUsageCredits(from limits: ChatGPTRateLimitsDTO) -> Metric<UsageCredits> {
+        // The map can also include separately metered models. Use the standard Codex
+        // bucket and only fall back to the legacy view when it represents that bucket.
+        let legacy = limits.rateLimits
+        let legacyCredits = legacy.limitID == nil || legacy.limitID == "codex" ? legacy.credits : nil
+        guard let credits = limits.rateLimitsByLimitID?["codex"]?.credits ?? legacyCredits else {
+            return .unavailable(
+                UnavailableMetric(reason: .notReturned, detail: "Codex did not report a usage credit balance.")
+            )
+        }
+
+        if credits.unlimited { return .available(.unlimited) }
+        if let balance = credits.balance?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !balance.isEmpty, balance.utf8.count <= 64,
+           balance.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+            return .available(.balance(balance))
+        }
+        return .available(credits.hasCredits ? .availableWithoutBalance : .noneAvailable)
     }
 
     public func connector(for accountID: UUID) throws -> ChatGPTAppServerConnector {
@@ -364,35 +385,22 @@ public struct ChatGPTUsageProvider: UsageProvider {
         return "\(minutes)-minute"
     }
 
-    private func humanReadablePlan(_ planType: String) -> String {
-        switch normalizedPlanIdentifier(planType) {
-        case "prolite", "chatgptprolite":
-            return "Pro Lite"
-        case "promax", "chatgptpromax":
-            return "Pro Max"
-        default:
-            return planType
-                .replacingOccurrences(of: "_", with: " ")
-                .replacingOccurrences(of: "-", with: " ")
-                .localizedCapitalized
-        }
-    }
-
-    func resolvedAccountKind(from planType: String) -> AccountKind? {
-        // Codex uses compact consumer tier IDs; matching a "pro"/"plus" word also
-        // incorrectly admits organization tiers such as edu_pro and edu_plus.
-        switch normalizedPlanIdentifier(planType) {
+    func resolvedPlan(from planType: String) -> (kind: AccountKind, label: String)? {
+        // Match Codex's consumer plan display labels, not the amount billed to an
+        // individual account. Keep an allowlist so edu_pro, etc. stay unsupported.
+        // https://github.com/openai/codex/blob/main/codex-rs/tui/src/status/helpers.rs
+        switch planType.lowercased().filter({ $0.isLetter || $0.isNumber }) {
         case "plus", "chatgptplus":
-            return .chatGPTPlus
-        case "pro", "chatgptpro", "prolite", "chatgptprolite", "promax", "chatgptpromax":
-            return .chatGPTPro
+            return (.chatGPTPlus, "Plus")
+        case "prolite", "chatgptprolite":
+            return (.chatGPTPro, "Pro 100")
+        case "pro", "chatgptpro":
+            return (.chatGPTPro, "Pro 200")
+        case "promax", "chatgptpromax":
+            return (.chatGPTPro, "Pro 500")
         default:
             return nil
         }
-    }
-
-    private func normalizedPlanIdentifier(_ planType: String) -> String {
-        planType.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     private func bankedResetStatus(_ status: String) -> BankedResetCreditStatus {

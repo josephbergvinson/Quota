@@ -678,8 +678,21 @@ final class AppModel: ObservableObject {
 
     func providerIdentityDescription(for accountID: UUID) -> String? {
         guard let identity = providerIdentities[accountID] else { return nil }
-        let components = [identity.accountLabel, identity.planLabel].compactMap { $0 }
-        return components.isEmpty ? nil : components.joined(separator: " · ")
+        return identity.accountLabel
+    }
+
+    func reportedPlan(for accountID: UUID) -> String? {
+        providerIdentities[accountID]?.planLabel
+    }
+
+    func planName(for account: ConnectedAccount) -> String {
+        let reported = reportedPlan(for: account.id)
+        let isGenericClaudeMax = account.kind.isClaudeSubscription
+            && ["max", "claude max"].contains(reported?.lowercased() ?? "")
+        if let reported, !isGenericClaudeMax {
+            return reported
+        }
+        return account.subscriptionBilling?.planName ?? reported ?? account.kind.shortName
     }
 
     private func scheduleAutomaticRefresh() {

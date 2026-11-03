@@ -231,17 +231,26 @@ public struct ClaudeCodeUsageProvider: UsageProvider {
     private func makeExtraUsageAllowance(
         _ extraUsage: ClaudeCodeExtraUsageDTO?
     ) throws -> Metric<Allowance> {
-        let unavailable = UnavailableMetric(
-            reason: .notExposedByProvider,
-            detail: "Claude Code did not report an enabled usage-credit allowance."
-        )
+        guard let extraUsage else {
+            return .unavailable(UnavailableMetric(
+                reason: .notExposedByProvider,
+                detail: "Claude Code did not report a usage-credit spending cap."
+            ))
+        }
+        guard extraUsage.isEnabled else {
+            return .unavailable(UnavailableMetric(
+                reason: .notReturned,
+                detail: "Paid extra usage is disabled."
+            ))
+        }
         guard
-            let extraUsage,
-            extraUsage.isEnabled,
             let usedCredits = extraUsage.usedCredits,
             let monthlyLimit = extraUsage.monthlyLimit
         else {
-            return .unavailable(unavailable)
+            return .unavailable(UnavailableMetric(
+                reason: .notReturned,
+                detail: "Claude Code did not report both monthly spend and its cap."
+            ))
         }
         guard
             usedCredits.isFinite,
@@ -254,26 +263,26 @@ public struct ClaudeCodeUsageProvider: UsageProvider {
         let normalizedCurrency = extraUsage.currency?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
-        guard normalizedCurrency == "USD" else {
+        guard let currency = normalizedCurrency, ["CAD", "USD"].contains(currency) else {
             return .available(
                 try Allowance(used: usedCredits, limit: monthlyLimit, unit: .credits)
             )
         }
 
-        // Claude reports extra-usage money in minor currency units. Older Claude Code
-        // responses omit `decimal_places`; USD safely falls back to its exponent of 2.
+        // Claude reports extra-usage money in minor currency units. USD and CAD
+        // both use two decimal places when an older response omits the exponent.
         let exponent = extraUsage.minorUnitExponent ?? 2
         guard (0...9).contains(exponent) else {
             throw ProviderError.invalidResponse
         }
         let divisor = pow(10, Double(exponent))
-        let usedDollars = usedCredits / divisor
-        let limitDollars = monthlyLimit / divisor
-        guard usedDollars.isFinite, limitDollars.isFinite else {
-            throw ProviderError.invalidResponse
-        }
         return .available(
-            try Allowance(used: usedDollars, limit: limitDollars, unit: .dollars)
+            try Allowance(
+                used: usedCredits / divisor,
+                limit: monthlyLimit / divisor,
+                unit: currency == "USD" ? .dollars : .credits,
+                currencyCode: currency == "USD" ? nil : currency
+            )
         )
     }
 
