@@ -43,6 +43,9 @@ struct AccountDetailView: View {
             VStack(alignment: .leading, spacing: 20) {
                 accountHeader
                 refreshFeedback
+                if account.kind.isManagedSubscription {
+                    subscriptionSection
+                }
                 capacitySection
                 metricGrid
                 historySection
@@ -117,6 +120,61 @@ struct AccountDetailView: View {
                 ProgressView()
                     .controlSize(.small)
             }
+        }
+    }
+
+    private var subscriptionSection: some View {
+        let billing = account.subscriptionBilling
+        let reportedPlan = model.reportedPlan(for: account.id)
+        let plan = model.planName(for: account)
+        let billingToday = SubscriptionBillingDetails.billingDate(onLocalDayOf: model.now)
+        let renewalPassed = billing?.renewalDate.map { $0 < billingToday } ?? false
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Subscription").font(.headline)
+                Spacer()
+                Button("Edit Billing Details…") {
+                    model.editingAccount = account
+                }
+            }
+            LabeledContent("Plan", value: plan)
+            if let enteredPlan = billing?.planName, enteredPlan != plan {
+                LabeledContent("Plan on invoice", value: enteredPlan)
+            }
+            if let reportedPlan, reportedPlan != plan {
+                LabeledContent("Provider-reported tier", value: reportedPlan)
+            }
+            LabeledContent(renewalPassed ? "Last entered renewal" : "Billing renewal") {
+                if let renewal = billing?.renewalDate {
+                    Text(renewal, format: Date.FormatStyle(
+                        date: .abbreviated,
+                        time: .omitted,
+                        calendar: SubscriptionBillingDetails.billingCalendar,
+                        timeZone: .gmt
+                    ))
+                } else {
+                    Text("Not entered").foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Cost per billing cycle") {
+                if let cents = billing?.costCADCents {
+                    let amount = Decimal(cents) / 100
+                    Text("\(amount.formatted(.currency(code: "CAD").locale(Locale(identifier: "en_CA")))) CAD")
+                } else {
+                    Text("Not entered").foregroundStyle(.secondary)
+                }
+            }
+            Text("Billing details are entered manually and are separate from usage resets.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.quaternary, lineWidth: 1)
         }
     }
 
@@ -226,23 +284,18 @@ struct AccountDetailView: View {
                     }
                 }
 
-                if let allowance = snapshot?.allowance.value {
+                if let allowance = snapshot?.allowance.value, snapshot?.source != .claudeCodeOAuth {
                     Divider()
                     AdditionalAllowanceRow(
                         allowance: allowance,
                         isStale: capacity.isStale || didRefreshFail,
-                        title: account.kind.isClaudeSubscription
-                            ? "Usage credits"
-                            : "Additional allowance",
-                        detail: account.kind.isClaudeSubscription
-                            ? "Optional paid usage"
-                            : nil
+                        title: "Additional allowance"
                     )
                 }
             } else {
                 CapacityBar(capacity: capacity)
 
-                if let allowance = snapshot?.allowance.value {
+                if let allowance = snapshot?.allowance.value, snapshot?.source != .claudeCodeOAuth {
                     HStack {
                         Text("\(QuotaFormat.amount(allowance.used, unit: allowance.unit)) used")
                         Spacer()
@@ -253,10 +306,31 @@ struct AccountDetailView: View {
                 } else {
                     UnavailableValue(
                         title: "Remaining allowance unavailable",
-                        detail: snapshot?.allowance.unavailability?.detail
+                        detail: (account.kind.isClaudeSubscription
+                            ? snapshot?.quotaWindows.unavailability?.detail
+                            : snapshot?.allowance.unavailability?.detail)
                             ?? "Refresh this account. The provider may not report a remaining allowance."
                     )
                 }
+            }
+
+            if account.kind.isClaudeSubscription {
+                Divider()
+                claudeUsageCreditsSection
+            }
+
+            if account.kind.isChatGPTSubscription {
+                Divider()
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Usage credits", systemImage: "creditcard")
+                        .font(.callout.weight(.semibold))
+                    Spacer()
+                    Text(codexUsageCreditsLabel)
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .help("Paid Codex usage credits are separate from banked resets and subscription charges.")
             }
 
             if let bankedResetCredits = snapshot?.bankedResetCredits.value {
@@ -274,6 +348,42 @@ struct AccountDetailView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(.quaternary, lineWidth: 1)
         }
+    }
+
+    private var claudeUsageCreditsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Usage credits", systemImage: "creditcard")
+                .font(.callout.weight(.semibold))
+
+            if snapshot?.source == .claudeCodeOAuth, let allowance = snapshot?.allowance.value {
+                AdditionalAllowanceRow(
+                    allowance: allowance,
+                    isStale: capacity.isStale || didRefreshFail,
+                    title: "Monthly spending cap"
+                )
+            } else if let detail = snapshot?.allowance.unavailability?.detail,
+                      snapshot?.source == .claudeCodeOAuth {
+                Text(capacity.isStale || didRefreshFail ? "Last reported: \(detail)" : detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Prepaid balance not reported. Check Claude Settings → Usage.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var codexUsageCreditsLabel: String {
+        guard let credits = snapshot?.usageCredits?.value else { return "Not reported" }
+        let label: String
+        switch credits {
+        case let .balance(balance): label = balance
+        case .unlimited: label = "Unlimited"
+        case .availableWithoutBalance: label = "Available · balance not reported"
+        case .noneAvailable: label = "None available"
+        }
+        return capacity.isStale || didRefreshFail ? "Last reported: \(label)" : label
     }
 
     @ViewBuilder
@@ -618,7 +728,6 @@ private struct AdditionalAllowanceRow: View {
     let allowance: Allowance
     let isStale: Bool
     let title: String
-    let detail: String?
 
     private var status: CapacityStatus {
         isStale ? .stale : .freshStatus(forRemainingFraction: allowance.remainingFraction)
@@ -632,8 +741,8 @@ private struct AdditionalAllowanceRow: View {
                 Spacer()
                 Text(
                     isStale
-                        ? "\(QuotaFormat.amount(allowance.remaining, unit: allowance.unit)) last reported"
-                        : "\(QuotaFormat.amount(allowance.remaining, unit: allowance.unit)) left"
+                        ? "\(formatted(allowance.remaining)) last reported"
+                        : "\(formatted(allowance.remaining)) left"
                 )
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(status.color)
@@ -642,16 +751,14 @@ private struct AdditionalAllowanceRow: View {
                 remainingFraction: allowance.remainingFraction,
                 status: status
             )
-            HStack {
-                Text("\(QuotaFormat.amount(allowance.used, unit: allowance.unit)) used of \(QuotaFormat.amount(allowance.limit, unit: allowance.unit))")
-                Spacer()
-                if let detail {
-                    Text(detail)
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            Text("\(formatted(allowance.used)) used of \(formatted(allowance.limit))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+    }
+
+    private func formatted(_ value: Double) -> String {
+        QuotaFormat.amount(value, unit: allowance.unit, currencyCode: allowance.currencyCode)
     }
 }
 

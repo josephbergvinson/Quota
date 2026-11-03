@@ -29,8 +29,11 @@ public struct Allowance: Codable, Equatable, Sendable {
     public let used: Double
     public let limit: Double
     public let unit: UsageUnit
+    /// Explicit provider currency for monetary allowances stored in major units.
+    /// Older USD readings use `.dollars` without a currency code.
+    public let currencyCode: String?
 
-    public init(used: Double, limit: Double, unit: UsageUnit) throws {
+    public init(used: Double, limit: Double, unit: UsageUnit, currencyCode: String? = nil) throws {
         guard used.isFinite, limit.isFinite else {
             throw DomainValidationError.nonFiniteUsage
         }
@@ -44,6 +47,7 @@ public struct Allowance: Codable, Equatable, Sendable {
         self.used = used
         self.limit = limit
         self.unit = unit
+        self.currencyCode = currencyCode
     }
 
     public var remaining: Double {
@@ -59,7 +63,7 @@ public struct Allowance: Codable, Equatable, Sendable {
     }
 
     public func validated() throws -> Allowance {
-        try Allowance(used: used, limit: limit, unit: unit)
+        try Allowance(used: used, limit: limit, unit: unit, currencyCode: currencyCode)
     }
 }
 
@@ -277,6 +281,15 @@ public enum UsageSource: String, Codable, Sendable {
     }
 }
 
+/// Paid usage credits are distinct from banked quota resets and subscription charges.
+public enum UsageCredits: Codable, Equatable, Sendable {
+    /// Provider-formatted credit balance, with no inferred currency.
+    case balance(String)
+    case unlimited
+    case availableWithoutBalance
+    case noneAvailable
+}
+
 public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let accountID: UUID
@@ -287,6 +300,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let quotaWindows: Metric<[QuotaWindow]>
     public let resetAt: Metric<Date>
     public let bankedResetCredits: Metric<BankedResetCredits>
+    public let usageCredits: Metric<UsageCredits>?
     public let totalTokens: Metric<Int>
     public let inputTokens: Metric<Int>
     public let cachedInputTokens: Metric<Int>
@@ -306,6 +320,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
         quotaWindows: Metric<[QuotaWindow]>,
         resetAt: Metric<Date>,
         bankedResetCredits: Metric<BankedResetCredits>? = nil,
+        usageCredits: Metric<UsageCredits>? = nil,
         totalTokens: Metric<Int>,
         inputTokens: Metric<Int>,
         cachedInputTokens: Metric<Int>,
@@ -324,6 +339,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
         self.quotaWindows = quotaWindows
         self.resetAt = resetAt
         self.bankedResetCredits = bankedResetCredits ?? Self.missingBankedResetCredits
+        self.usageCredits = usageCredits
         self.totalTokens = totalTokens
         self.inputTokens = inputTokens
         self.cachedInputTokens = cachedInputTokens
@@ -404,6 +420,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
         case quotaWindows
         case resetAt
         case bankedResetCredits
+        case usageCredits
         case totalTokens
         case inputTokens
         case cachedInputTokens
@@ -429,6 +446,7 @@ public struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
                 Metric<BankedResetCredits>.self,
                 forKey: .bankedResetCredits
             ),
+            usageCredits: try container.decodeIfPresent(Metric<UsageCredits>.self, forKey: .usageCredits),
             totalTokens: try container.decode(Metric<Int>.self, forKey: .totalTokens),
             inputTokens: try container.decode(Metric<Int>.self, forKey: .inputTokens),
             cachedInputTokens: try container.decode(Metric<Int>.self, forKey: .cachedInputTokens),

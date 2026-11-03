@@ -62,7 +62,7 @@ private struct AccountSidebarRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.displayName)
                     .lineLimit(1)
-                Text(account.kind.shortName)
+                Text(model.planName(for: account))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

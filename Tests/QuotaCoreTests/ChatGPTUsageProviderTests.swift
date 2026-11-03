@@ -7,10 +7,10 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         let provider = makeProvider()
 
         for plan in ["plus", "chatgpt_plus", " ChatGPT Plus "] {
-            XCTAssertEqual(provider.resolvedAccountKind(from: plan), .chatGPTPlus, plan)
+            XCTAssertEqual(provider.resolvedPlan(from: plan)?.kind, .chatGPTPlus, plan)
         }
         for plan in ["Pro", "chatgpt_pro", "prolite", "promax", "ChatGPT Pro Lite", "chatgpt_pro_max"] {
-            XCTAssertEqual(provider.resolvedAccountKind(from: plan), .chatGPTPro, plan)
+            XCTAssertEqual(provider.resolvedPlan(from: plan)?.kind, .chatGPTPro, plan)
         }
         for plan in [
             "free", "go", "team", "self_serve_business_prolite",
@@ -18,7 +18,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             "enterprise_cbp_automation", "enterprise_cbp_usage_based", "enterprise",
             "edu", "edu_plus", "edu_pro", "unknown", "pro_future", "", "not-pro"
         ] {
-            XCTAssertNil(provider.resolvedAccountKind(from: plan), plan)
+            XCTAssertNil(provider.resolvedPlan(from: plan), plan)
         }
     }
 
@@ -141,7 +141,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             resetCredits: nil
         )
 
-        for (plan, label) in [("prolite", "Pro Lite"), ("promax", "Pro Max")] {
+        for (plan, label) in [("prolite", "Pro 100"), ("pro", "Pro 200"), ("promax", "Pro 500")] {
             let result = try await fetchResult(
                 email: "pro@example.com",
                 reportedPlan: plan,
@@ -695,6 +695,62 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         XCTAssertEqual(windows.first?.remainingPercent, 20)
     }
 
+    func testPaidCreditsUseStandardCodexBucketAndRoundTripWithoutACurrency() async throws {
+        let limits = ChatGPTRateLimitsDTO(
+            rateLimits: makeSnapshot(
+                limitID: "codex",
+                credits: .init(balance: "5", hasCredits: true, unlimited: false)
+            ),
+            rateLimitsByLimitID: [
+                "codex": makeSnapshot(
+                    limitID: "codex",
+                    credits: .init(balance: "12.50", hasCredits: true, unlimited: false)
+                ),
+                "codex_bengalfox": makeSnapshot(
+                    limitID: "codex_bengalfox",
+                    credits: .init(balance: "100", hasCredits: true, unlimited: false)
+                )
+            ],
+            resetCredits: nil
+        )
+
+        let result = try await fetchResult(email: nil, rateLimits: limits)
+        XCTAssertEqual(result.snapshot.usageCredits?.value, .balance("12.50"))
+        let data = try JSONEncoder().encode(result.snapshot)
+        XCTAssertEqual(
+            try JSONDecoder().decode(UsageSnapshot.self, from: data).usageCredits,
+            result.snapshot.usageCredits
+        )
+    }
+
+    func testPaidCreditsDistinguishUnreportedZeroUnlimitedAndUnknownBalance() async throws {
+        let cases: [(ChatGPTCreditsSnapshotDTO?, UsageCredits?)] = [
+            (nil, nil),
+            (.init(balance: "0", hasCredits: false, unlimited: false), .balance("0")),
+            (.init(balance: nil, hasCredits: false, unlimited: false), .noneAvailable),
+            (.init(balance: nil, hasCredits: true, unlimited: false), .availableWithoutBalance),
+            (.init(balance: "0", hasCredits: true, unlimited: true), .unlimited)
+        ]
+
+        for (credits, expected) in cases {
+            let limits = ChatGPTRateLimitsDTO(
+                rateLimits: makeSnapshot(credits: credits),
+                rateLimitsByLimitID: [
+                    "codex_bengalfox": makeSnapshot(
+                        limitID: "codex_bengalfox",
+                        credits: .init(balance: "100", hasCredits: true, unlimited: false)
+                    )
+                ],
+                resetCredits: nil
+            )
+            let result = try await fetchResult(email: nil, rateLimits: limits)
+            XCTAssertEqual(result.snapshot.usageCredits?.value, expected)
+            if expected == nil {
+                XCTAssertEqual(result.snapshot.usageCredits?.unavailability?.reason, .notReturned)
+            }
+        }
+    }
+
     private func fetchResult(
         email: String?,
         reportedPlan: String = "pro",
@@ -748,7 +804,8 @@ final class ChatGPTUsageProviderTests: XCTestCase {
         limitID: String? = nil,
         limitName: String? = nil,
         primary: ChatGPTRateLimitWindowDTO? = nil,
-        secondary: ChatGPTRateLimitWindowDTO? = nil
+        secondary: ChatGPTRateLimitWindowDTO? = nil,
+        credits: ChatGPTCreditsSnapshotDTO? = nil
     ) -> ChatGPTRateLimitSnapshotDTO {
         ChatGPTRateLimitSnapshotDTO(
             limitID: limitID,
@@ -756,7 +813,7 @@ final class ChatGPTUsageProviderTests: XCTestCase {
             planType: "pro",
             primary: primary,
             secondary: secondary,
-            credits: nil,
+            credits: credits,
             individualLimit: nil,
             rateLimitReachedType: nil,
             spendControlReached: nil

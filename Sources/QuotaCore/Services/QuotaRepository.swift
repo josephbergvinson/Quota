@@ -246,7 +246,8 @@ public actor QuotaRepository {
                 displayName: existingAccount.displayName,
                 kind: resolvedAccountKind,
                 organizationIdentifier: existingAccount.organizationIdentifier,
-                createdAt: existingAccount.createdAt
+                createdAt: existingAccount.createdAt,
+                subscriptionBilling: existingAccount.subscriptionBilling
             )
         }
 

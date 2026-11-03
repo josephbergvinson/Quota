@@ -143,13 +143,15 @@ public struct ConnectedAccount: Codable, Identifiable, Equatable, Sendable {
     public let kind: AccountKind
     public var organizationIdentifier: String?
     public let createdAt: Date
+    public let subscriptionBilling: SubscriptionBillingDetails?
 
     public init(
         id: UUID = UUID(),
         displayName: String,
         kind: AccountKind,
         organizationIdentifier: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        subscriptionBilling: SubscriptionBillingDetails? = nil
     ) throws {
         let normalizedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else {
@@ -168,6 +170,16 @@ public struct ConnectedAccount: Codable, Identifiable, Equatable, Sendable {
         }
         self.organizationIdentifier = normalizedOrganizationIdentifier
         self.createdAt = createdAt
+        if kind.isManagedSubscription, let subscriptionBilling {
+            let details = try SubscriptionBillingDetails(
+                planName: subscriptionBilling.planName,
+                renewalDate: subscriptionBilling.renewalDate,
+                costCADCents: subscriptionBilling.costCADCents
+            )
+            self.subscriptionBilling = details.isEmpty ? nil : details
+        } else {
+            self.subscriptionBilling = nil
+        }
     }
 
     public func validated() throws -> ConnectedAccount {
@@ -176,7 +188,8 @@ public struct ConnectedAccount: Codable, Identifiable, Equatable, Sendable {
             displayName: displayName,
             kind: kind,
             organizationIdentifier: organizationIdentifier,
-            createdAt: createdAt
+            createdAt: createdAt,
+            subscriptionBilling: subscriptionBilling
         )
     }
 }
@@ -193,6 +206,7 @@ public enum DomainValidationError: LocalizedError, Equatable {
     case invalidWindowDuration
     case invalidWindowActivation
     case invalidBankedResetCredits
+    case invalidSubscriptionCost
 
     public var errorDescription: String? {
         switch self {
@@ -218,6 +232,8 @@ public enum DomainValidationError: LocalizedError, Equatable {
             "A window that starts on first use must be unused, unscheduled, and have a duration."
         case .invalidBankedResetCredits:
             "Banked reset data contains an invalid count or expiry time."
+        case .invalidSubscriptionCost:
+            "Enter a non-negative CAD amount, using a decimal point and up to two decimal places."
         }
     }
 }

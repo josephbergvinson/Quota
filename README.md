@@ -81,9 +81,11 @@ Running `make install` again replaces only `~/Applications/Quota.app`; it does n
 
 ChatGPT telemetry is the supported ChatGPT-backed **Codex** surface. It is not a general API for every quota in ChatGPT web, voice, images, deep research, or other products. Quota preserves the window names returned by Codex and leaves unsupported account-wide model breakdowns unavailable.
 
-ChatGPT Pro includes the consumer Pro Lite and Pro Max tiers reported by Codex. Quota uses their reported quotas and reset times without deriving allowances from plan prices or multipliers. Business, Team, Enterprise, and education plans are not supported.
+Quota displays the Codex-reported consumer tiers as Plus, Pro 100, Pro 200, or Pro 500. These are plan names, not CAD prices. Business, Team, Enterprise, and education plans are not supported.
 
-When Codex reports earned banked resets, Quota shows the provider's authoritative available count on the account. Credit details can be unavailable or capped, and individual credits may not expire, so Quota labels missing expiry details instead of deriving them from the count.
+Use **Edit Billing Details** on any ChatGPT or Claude subscription account to record the exact invoice plan, renewal date, and CAD cost per billing cycle. These optional fields are stored locally and are not available from the usage connections. Enter the amount from your own billing record; Quota does not convert list prices, predict the next charge, or advance renewal dates. If Claude Code reports only “Max,” you can enter the exact tier, such as “Max 20x.”
+
+Quota shows the usage credit balance Codex reports, separately from earned banked resets. Credit balances are not subscription prices or API organization credits. When Codex reports earned banked resets, Quota shows the provider's authoritative available count and labels any missing expiry details.
 
 The Overview uses one common 7-day, 30-day, or all-reported-history range for its headline totals and chart. Each account chart offers the same ranges; its all-time view merges that account's locally retained provider history without double-counting overlapping reports. Total tokens include every account with daily provider data. Cached input, uncached input, and output cards and chart categories appear only when at least one connected provider reports those splits; otherwise the chart is total-only. Usage charts can switch between daily activity and a cumulative running total for the selected range.
 
@@ -91,7 +93,7 @@ API organization usage and consumer subscription usage are separate account type
 
 Claude subscription accounts use the same Claude.ai sign-in as Claude Code—never an Anthropic API key. Quota creates a separate Claude Code configuration directory for every account. Claude Code normally stores that profile's OAuth session in macOS Keychain and can use its documented permission-restricted credentials-file fallback; Quota does not read or copy either credential. If the automatic browser return fails, the in-progress account view exposes Claude Code's official code-based fallback and submits that code only to the same running sign-in process. Anthropic currently marks the machine-readable usage control as experimental, so Quota detects support at runtime, accepts additive response changes, and leaves values unavailable if Claude Code stops reporting them.
 
-Claude Code does not currently provide Quota with daily subscription token history, costs, requests, or banked resets. Those sections stay hidden or explicitly say that token history was not reported—Quota does not derive them from utilization percentages. When optional usage credits are enabled and reported, Quota shows that allowance separately and does not invent a reset date.
+Claude Code does not currently provide Quota with daily subscription token history, requests, or banked resets. Quota displays reported extra-usage spend and the monthly cap, including CAD when Claude reports it, separately from included usage. The spending cap is not a prepaid balance; check Claude Settings → Usage for any balance that Claude Code does not report.
 
 Provider documentation:
 

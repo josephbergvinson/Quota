@@ -193,6 +193,35 @@ final class ClaudeCodeUsageProviderTests: XCTestCase {
         XCTAssertEqual(allowance.value?.unit, .dollars)
     }
 
+    func testProviderPreservesCADSpendingCapAndCurrencyAcrossSnapshots() async throws {
+        let allowance = try await fetchExtraUsageAllowance(
+            ClaudeCodeExtraUsageDTO(
+                isEnabled: true,
+                monthlyLimit: 5_000,
+                usedCredits: 1_275,
+                utilization: 25.5,
+                currency: " cad ",
+                minorUnitExponent: 2
+            )
+        )
+        let reading = try XCTUnwrap(allowance.value)
+
+        XCTAssertEqual(reading.used, 12.75)
+        XCTAssertEqual(reading.limit, 50)
+        XCTAssertEqual(reading.remaining, 37.25)
+        XCTAssertEqual(reading.currencyCode, "CAD")
+        XCTAssertEqual(try reading.validated(), reading)
+        XCTAssertEqual(try JSONDecoder().decode(Allowance.self, from: JSONEncoder().encode(reading)), reading)
+    }
+
+    func testLegacyAllowanceDecodesWithoutCurrencyMetadata() throws {
+        let legacy = Data(#"{"used":12.75,"limit":50,"unit":"dollars"}"#.utf8)
+        let reading = try JSONDecoder().decode(Allowance.self, from: legacy)
+
+        XCTAssertEqual(reading.unit, .dollars)
+        XCTAssertNil(reading.currencyCode)
+    }
+
     func testProviderDoesNotAssumeCurrencyUnitsWhenCurrencyIsMissing() async throws {
         let allowance = try await fetchExtraUsageAllowance(
             ClaudeCodeExtraUsageDTO(
@@ -222,7 +251,23 @@ final class ClaudeCodeUsageProviderTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(allowance.unavailability?.reason, .notExposedByProvider)
+        XCTAssertEqual(allowance.unavailability?.reason, .notReturned)
+        XCTAssertNil(allowance.value)
+    }
+
+    func testProviderDistinguishesDisabledExtraUsageFromUnreportedCap() async throws {
+        let allowance = try await fetchExtraUsageAllowance(
+            ClaudeCodeExtraUsageDTO(
+                isEnabled: false,
+                monthlyLimit: nil,
+                usedCredits: 0,
+                utilization: nil,
+                currency: "CAD",
+                minorUnitExponent: 2
+            )
+        )
+
+        XCTAssertEqual(allowance.unavailability?.detail, "Paid extra usage is disabled.")
         XCTAssertNil(allowance.value)
     }
 

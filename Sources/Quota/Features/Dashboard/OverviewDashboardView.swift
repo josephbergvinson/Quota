@@ -296,9 +296,10 @@ private struct AccountCapacityCard: View {
                         Text(capacity.account.displayName)
                             .font(.headline)
                             .lineLimit(1)
-                        Text(capacity.account.kind.shortName)
+                        Text(model.planName(for: capacity.account))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
